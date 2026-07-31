@@ -473,7 +473,7 @@ static void DrawPlayer() {
 
 static void DrawMagma(const Rectangle& m) {
 	Vector2 center = { m.x + m.width/2, m.y + m.height/2 };
-	DrawCircleGradient((int)center.x, (int)center.y, 26, Fade(Color{255,90,45,255}, 0.35f), Fade(Color{255,90,45,255}, 0.0f));
+	DrawCircleGradient(center, 26, Fade(Color{255,90,45,255}, 0.35f), Fade(Color{255,90,45,255}, 0.0f));
 
 	DrawRectangleRounded({m.x+2, m.y+2, m.width-4, m.height-4}, 0.3f, 16, Color{130,35,20,255});
 	DrawRectangleRounded(m, 0.3f, 16, C_RED);
@@ -491,7 +491,7 @@ static void DrawCoin(const Rectangle& c, double tick) {
 }
 
 static void DrawGlowCircle(Vector2 center, float radius, Color color, float alpha) {
-	DrawCircleGradient((int)center.x, (int)center.y, radius, Fade(color, alpha / 255.0f), Fade(color, 0.0f));
+	DrawCircleGradient(center, radius, Fade(color, alpha / 255.0f), Fade(color, 0.0f));
 }
 
 // ---------- CONSOLE ----------

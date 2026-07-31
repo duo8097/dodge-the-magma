@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # raylib: dùng bản đã cài trong hệ thống nếu có, không thì tự
 # tải về và build bằng FetchContent (cần internet lúc configure).
 # ------------------------------------------------------------
-find_package(raylib REQUIRED)
+find_package(raylib 6.0 QUIET)
 
 if (NOT raylib_FOUND)
     include(FetchContent)
@@ -16,6 +16,7 @@ if (NOT raylib_FOUND)
     FetchContent_Declare(
         raylib
         GIT_REPOSITORY https://github.com/raysan5/raylib.git
+        GIT_TAG        6.0
         GIT_SHALLOW    TRUE
     )
     # Không build ví dụ/game mẫu của raylib, chỉ build thư viện
