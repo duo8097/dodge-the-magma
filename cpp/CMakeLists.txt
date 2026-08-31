@@ -53,7 +53,7 @@ if (APPLE)
         "-framework OpenGL"
     )
 elseif (WIN32)
-    target_link_libraries(dodge_magma PRIVATE winmm gdi32 opengl32)
+    target_link_libraries(dodge_magma PRIVATE winmm gdi32 opengl32 ws2_32)
 elseif (UNIX)
     target_link_libraries(dodge_magma PRIVATE GL m pthread dl rt X11)
 endif()
