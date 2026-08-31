@@ -1069,7 +1069,7 @@ int main() {
 					if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
 						join_account_id_input.pop_back();
 					}
-					if (IsKeyPressed(KEY_J) && !join_account_id_input.empty()) {
+					if (IsKeyPressed(KEY_J)) {
 						g_network->JoinGame(join_account_id_input);
 					}
 				}

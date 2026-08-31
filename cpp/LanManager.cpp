@@ -41,6 +41,7 @@ LanManager& LanManager::Get() {
 }
 
 bool LanManager::Init() {
+    Shutdown(); // Ensure old sockets are cleaned up if re-initializing
 #ifdef _WIN32
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -75,6 +76,11 @@ void LanManager::HostGame() {
     m_isHost = true;
     m_statusMessage = "Hosting LAN (UDP)...";
     
+    if (m_serverSocket != INVALID_SOCKET_VAL) {
+        CLOSE_SOCKET((socket_t)m_serverSocket);
+        m_serverSocket = INVALID_SOCKET_VAL;
+    }
+    
     socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock == INVALID_SOCKET_VAL) return;
     
@@ -100,6 +106,11 @@ void LanManager::HostGame() {
 void LanManager::JoinGame(const std::string& addressOrId) {
     m_isHost = false;
     m_statusMessage = "Joining LAN (UDP)...";
+    
+    if (m_clientSocket != INVALID_SOCKET_VAL) {
+        CLOSE_SOCKET((socket_t)m_clientSocket);
+        m_clientSocket = INVALID_SOCKET_VAL;
+    }
     
     socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock == INVALID_SOCKET_VAL) return;
