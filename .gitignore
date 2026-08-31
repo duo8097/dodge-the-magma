@@ -17,3 +17,5 @@ save.txt
 .python-version
 dodge_the_magma_desktop_py.spec
 eos-sdk
+host.log
+join.log

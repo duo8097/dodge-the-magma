@@ -15,6 +15,11 @@
 #include <algorithm>
 #include <cctype>
 
+#include "EOSManager.h"
+#include "LanManager.h"
+
+NetworkProvider* g_network = nullptr;
+
 // ---------- CONSTANTS ----------
 static const int   DEFAULT_TARGET_FPS  = 60;
 static const int   DEFAULT_WIDTH       = 1280;
@@ -311,6 +316,15 @@ static float coyote_time = 0;
 static const float jump_buffer_max = 6;
 static float jump_buffer_time = 0;
 
+// Remote Player (Multiplayer)
+static bool is_multiplayer = false;
+static float remote_player_x = 0;
+static float remote_player_y = 0;
+static bool remote_has_shield = false;
+static std::string login_status = "Not Logged In";
+static std::string my_account_id = "";
+static std::string join_account_id_input = "";
+
 // dash
 static float dash_velocity = 0.0f;
 static float dash_duration = 0;
@@ -381,12 +395,27 @@ static void ResetRun() {
 	magma_list.clear();
 	coin_list.clear();
 	facing = 1;
+	remote_player_x = -1000;
+	remote_player_y = -1000;
+	remote_has_shield = false;
 	double now = NowMs();
 	next_magma_spawn = now + 300;
 	next_coin_spawn = now + 900;
 }
 
 // ---------- SPAWN PATTERNS ----------
+static void AddMagma(float x, float y, float w, float h) {
+	magma_list.push_back({x, y, w, h});
+	if (is_multiplayer && g_network->IsHost()) {
+		SpawnMagmaPacket packet;
+		packet.x = x;
+		packet.w = w;
+		packet.h = h;
+		packet.speed = 0; // Not used yet
+		g_network->SendPacket(&packet, sizeof(packet));
+	}
+}
+
 static void SpawnMagmaPattern() {
 	int roll = RandInt(1, 100);
 	std::string pattern;
@@ -398,13 +427,13 @@ static void SpawnMagmaPattern() {
 	int spawnX = RandInt(20, std::max(20, WIDTH - 50));
 
 	if (pattern == "single") {
-		magma_list.push_back({(float)spawnX, -30, 30, 30});
+		AddMagma((float)spawnX, -30, 30, 30);
 	} else if (pattern == "double") {
 		int offset = (RandInt(0,1) == 0) ? 40 : 55;
 		float x1 = clampf((float)spawnX, 0, WIDTH - MAGMA_SIZE);
 		float x2 = clampf((float)(spawnX + offset), 0, WIDTH - MAGMA_SIZE);
-		magma_list.push_back({x1, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE});
-		magma_list.push_back({x2, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE});
+		AddMagma(x1, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE);
+		AddMagma(x2, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE);
 	} else if (pattern == "cluster") {
 		int offsets[4] = {-44, -12, 20, 52};
 		std::vector<int> idxs = {0,1,2,3};
@@ -412,13 +441,13 @@ static void SpawnMagmaPattern() {
 		int count = RandInt(3, 4);
 		for (int i = 0; i < count; i++) {
 			float x = clampf((float)(spawnX + offsets[idxs[i]]), 0, WIDTH - MAGMA_SIZE);
-			magma_list.push_back({x, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE});
+			AddMagma(x, -(float)MAGMA_SIZE, (float)MAGMA_SIZE, (float)MAGMA_SIZE);
 		}
 	} else {
 		int lane = RandInt(0, 3);
 		for (int i = 0; i < 4; i++) {
 			float x = clampf((float)(spawnX + (i - lane) * 34), 0, WIDTH - MAGMA_SIZE);
-			magma_list.push_back({x, -(float)MAGMA_SIZE - i * 10, (float)MAGMA_SIZE, (float)MAGMA_SIZE});
+			AddMagma(x, -(float)MAGMA_SIZE - i * 10, (float)MAGMA_SIZE, (float)MAGMA_SIZE);
 		}
 	}
 }
@@ -645,17 +674,30 @@ static void DrawInfoHub() {
 }
 
 static void DrawMenu() {
-	DrawBox(WIDTH/2 - 260, 170, 520, 360, BLACK, C_WHITE);
-	int y = 210;
-	int gap = 42;
+	DrawBox(WIDTH/2 - 260, 150, 520, 480, BLACK, C_WHITE);
+	int y = 180;
+	int gap = 38;
 	int tw = GMeasure("DODGE THE MAGMA", 48);
 	GText("DODGE THE MAGMA", (float)(WIDTH/2 - tw/2), (float)y, 48, C_WHITE);
-	y += 72;
-	DrawTextCentered("[ SPACE ] START", y, C_BLUE, 28);   y += gap;
-	DrawTextCentered("[ S ] SHOP",      y, C_GREEN, 28);  y += gap;
-	DrawTextCentered("[ O ] SETTINGS",  y, C_PURPLE, 28); y += gap;
-	DrawTextCentered("[ Q ] EXIT",      y, C_RED, 28);    y += gap;
-	DrawTextCentered(TextFormat("COINS: %d", coins), y, C_YELLOW, 28);
+	y += 60;
+	DrawTextCentered("[ SPACE ] START", y, C_BLUE, 24);   y += gap;
+	DrawTextCentered("[ S ] SHOP",      y, C_GREEN, 24);  y += gap;
+	DrawTextCentered("[ O ] SETTINGS",  y, C_PURPLE, 24); y += gap;
+	DrawTextCentered("[ Q ] EXIT",      y, C_RED, 24);    y += gap;
+	
+	// Multiplayer UI
+	y += 10;
+	DrawTextCentered("--- MULTIPLAYER ---", y, C_ORANGE, 24); y += gap;
+	std::string netType = (g_network == &LanManager::Get()) ? "Mode: LAN (IP)" : "Mode: Online (EOS)";
+	DrawTextCentered(TextFormat("[ C ] CHANGE MODE: %s", netType.c_str()), y, C_YELLOW, 20); y += gap;
+	
+	if (!my_account_id.empty()) {
+		DrawTextCentered(TextFormat("My ID: %s", my_account_id.c_str()), y, C_GREEN, 18); y += gap;
+	}
+	DrawTextCentered("[ H ] HOST GAME", y, C_YELLOW, 20); y += gap;
+	DrawTextCentered(TextFormat("[ J ] JOIN GAME: %s", join_account_id_input.c_str()), y, C_YELLOW, 20); y += gap;
+	
+	DrawTextCentered(login_status.c_str(), y, C_WHITE, 18); y += gap;
 }
 
 static void DrawShop() {
@@ -839,7 +881,36 @@ int main() {
 	settings_custom_h = std::to_string(HEIGHT);
 	settings_fps = TARGET_FPS;
 
+	// Initialize Network (Default to LAN)
+	g_network = &LanManager::Get();
+	g_network->Init();
+
+	auto BindNetworkCallbacks = []() {
+		g_network->onPlayerStateReceived = [](const PlayerStatePacket& packet) {
+			remote_player_x = packet.x;
+			remote_player_y = packet.y;
+			remote_has_shield = packet.has_shield;
+		};
+		
+		g_network->onMagmaSpawnReceived = [](const SpawnMagmaPacket& packet) {
+			Rectangle m = {packet.x, -packet.h, packet.w, packet.h};
+			magma_list.push_back(m);
+		};
+
+		g_network->onConnectionEstablished = [](bool connected) {
+			if (connected) {
+				is_multiplayer = true;
+				ResetRun();
+			} else {
+				is_multiplayer = false;
+			}
+		};
+	};
+	BindNetworkCallbacks();
+
 	while (!WindowShouldClose()) {
+		g_network->Tick();
+		
 		float dt = GetFrameTime() * (float)TARGET_FPS;
 		dt = clampf(dt, 0.0f, 3.0f);
 		double tick = NowMs();
@@ -951,70 +1022,110 @@ int main() {
 				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MENU;
 			}
 
+// Switch game state with proper case scopes
 			switch (gameState) {
-				case GameState::MENU:
-					if (IsKeyPressed(KEY_SPACE)) ResetRun();
-					if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
-					if (IsKeyPressed(KEY_O)) {
-						gameState = GameState::SETTINGS;
-						settings_fullscreen = g_fullscreen;
-						settings_fps = TARGET_FPS;
-						settings_selected_preset = -1;
-						for (int i = 0; i < 3; i++) {
-							if (SETTINGS_PRESETS[i][0] == WIDTH && SETTINGS_PRESETS[i][1] == HEIGHT)
-								settings_selected_preset = i;
+			case GameState::MENU: {
+				if (IsKeyPressed(KEY_SPACE)) ResetRun();
+				if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
+				if (IsKeyPressed(KEY_O)) {
+					gameState = GameState::SETTINGS;
+					settings_fullscreen = g_fullscreen;
+					settings_fps = TARGET_FPS;
+					settings_selected_preset = -1;
+					for (int i = 0; i < 3; i++) {
+						if (SETTINGS_PRESETS[i][0] == WIDTH && SETTINGS_PRESETS[i][1] == HEIGHT)
+							settings_selected_preset = i;
+					}
+					settings_custom_w = std::to_string(WIDTH);
+					settings_custom_h = std::to_string(HEIGHT);
+					settings_active_field = 0;
+				}
+				if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
+				
+				// Multiplayer Input
+				if (IsKeyPressed(KEY_C)) {
+					if (g_network == &LanManager::Get()) {
+						g_network = &EOSManager::Get();
+						g_network->Init();
+						BindNetworkCallbacks();
+					} else {
+						g_network = &LanManager::Get();
+						g_network->Init();
+						BindNetworkCallbacks();
+					}
+				}
+				if (IsKeyPressed(KEY_H)) {
+					g_network->HostGame();
+				}
+				// Type to join – scoped block
+				{
+					int ch = GetCharPressed();
+					while (ch > 0) {
+						if (ch >= 32 && ch <= 125) {
+							join_account_id_input += (char)ch;
 						}
-						settings_custom_w = std::to_string(WIDTH);
-						settings_custom_h = std::to_string(HEIGHT);
-						settings_active_field = 0;
+						ch = GetCharPressed();
 					}
-					if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
-					break;
-				case GameState::SHOP:
-					if (IsKeyPressed(KEY_ONE)   && coins >= 20)  { player_speed += 1; coins -= 20;  QueueSave(); }
-					if (IsKeyPressed(KEY_TWO)   && coins >= 30)  { jump_strength -= 2; coins -= 30; QueueSave(); }
-					if (IsKeyPressed(KEY_THREE) && coins >= 100) {
-						shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
-						shield_time_real += 10; coins -= 100; QueueSave();
+					if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
+						join_account_id_input.pop_back();
 					}
-					if (IsKeyPressed(KEY_FOUR) && coins >= 150) {
-						magnet_level += 1; coins -= 150; QueueSave();
+					if (IsKeyPressed(KEY_J) && !join_account_id_input.empty()) {
+						g_network->JoinGame(join_account_id_input);
 					}
-					if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MENU;
-					break;
-				case GameState::PAUSE:
-					if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::GAME;
+				}
+				login_status = g_network->GetStatus();
+				my_account_id = g_network->GetMyId();
+				break;
+			}
+			case GameState::SHOP: {
+				if (IsKeyPressed(KEY_ONE)   && coins >= 20) { player_speed += 1; coins -= 20;  QueueSave(); }
+				if (IsKeyPressed(KEY_TWO)   && coins >= 30) { jump_strength -= 2; coins -= 30; QueueSave(); }
+				if (IsKeyPressed(KEY_THREE) && coins >= 100) {
+					shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
+					shield_time_real += 10; coins -= 100; QueueSave();
+				}
+				if (IsKeyPressed(KEY_FOUR) && coins >= 150) {
+					magnet_level += 1; coins -= 150; QueueSave();
+				}
+				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MENU;
+				break;
+			}
+			case GameState::PAUSE: {
+				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::GAME;
+				if (IsKeyPressed(KEY_M)) gameState = GameState::MENU;
+				if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
+				break;
+			}
+			case GameState::GAMEOVER: {
+				if (tick >= gameover_input_unlock_at) {
+					if (IsKeyPressed(KEY_SPACE)) ResetRun();
 					if (IsKeyPressed(KEY_M)) gameState = GameState::MENU;
+					if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
 					if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
-					break;
-				case GameState::GAMEOVER:
-					if (tick >= gameover_input_unlock_at) {
-						if (IsKeyPressed(KEY_SPACE)) ResetRun();
-						if (IsKeyPressed(KEY_M)) gameState = GameState::MENU;
-						if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
-						if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
-					}
-					break;
-				case GameState::GAME:
-					if (IsKeyPressed(KEY_SPACE)) jump_buffer_time = jump_buffer_max;
-					if (IsKeyPressed(KEY_Q) && dash_cooldown <= 0) {
-						dash_velocity = DASH_SPEED * facing;
-						dash_duration = 12;
-						dash_cooldown = 60;
-					}
-					if (IsKeyPressed(KEY_E) && shield_cooldown <= 0) {
-						shield = true;
-						shield_time = shield_time_real;
-						shield_cooldown = shield_cooldown_real;
-					}
-					if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::PAUSE;
-					break;
-				case GameState::SETTINGS:
-					break; // handled above
+				}
+				break;
+			}
+			case GameState::GAME: {
+				if (IsKeyPressed(KEY_SPACE)) jump_buffer_time = jump_buffer_max;
+				if (IsKeyPressed(KEY_Q) && dash_cooldown <= 0) {
+					dash_velocity = DASH_SPEED * facing;
+					dash_duration = 12;
+					dash_cooldown = 60;
+				}
+				if (IsKeyPressed(KEY_E) && shield_cooldown <= 0) {
+					shield = true;
+					shield_time = shield_time_real;
+					shield_cooldown = shield_cooldown_real;
+				}
+				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::PAUSE;
+				break;
+			}
+			case GameState::SETTINGS: {
+				break; // handled elsewhere
+			}
 			}
 			if (gameState == GameState::GAME && IsKeyReleased(KEY_SPACE)) jump_hold_time = 0;
 		}
-
 		// ---------- UPDATE + DRAW ----------
 		BeginDrawing();
 		ClearBackground(C_BG);
@@ -1103,12 +1214,27 @@ int main() {
 
 			// spawn
 			if (tick >= next_magma_spawn) {
-				SpawnMagmaPattern();
+				if (!is_multiplayer || g_network->IsHost()) {
+					SpawnMagmaPattern();
+				}
 				next_magma_spawn = tick + RandInt(380, 700);
 			}
 			if (tick >= next_coin_spawn) {
-				SpawnCoinPattern();
+				if (!is_multiplayer || g_network->IsHost()) {
+					SpawnCoinPattern();
+				}
 				next_coin_spawn = tick + RandInt(850, 1350);
+			}
+
+			// Send player state if multiplayer
+			if (is_multiplayer) {
+				PlayerStatePacket packet;
+				packet.x = player.x;
+				packet.y = player.y;
+				packet.vx = player_vx;
+				packet.vy = velocity_y;
+				packet.has_shield = shield;
+				g_network->SendPacket(&packet, sizeof(packet));
 			}
 
 			float magmaSpeed = std::min(MAGMA_MAX_SPEED, MAGMA_BASE_SPEED + score * MAGMA_SCORE_SCALE);
@@ -1189,6 +1315,21 @@ int main() {
 			// draw world
 			for (auto& m : magma_list) DrawMagma(m);
 			for (auto& c : coin_list)  DrawCoin(c, tick);
+			
+			// Draw remote player
+			if (is_multiplayer && remote_player_x != -1000) {
+				Rectangle rp = {remote_player_x, remote_player_y, (float)PLAYER_SIZE, (float)PLAYER_SIZE};
+				DrawRectangleRounded(rp, 0.2f, 16, Fade(C_ORANGE, 0.7f));
+				DrawRectangleRoundedLines(rp, 0.2f, 16, C_WHITE);
+				
+				if (remote_has_shield) {
+					Vector2 remoteCenter = { rp.x + rp.width/2, rp.y + rp.height/2 };
+					int pulse = 28 + (int)((std::sin(tick * 0.03) + 1) * 2);
+					DrawGlowCircle(remoteCenter, (float)pulse, C_GREEN, 75);
+					DrawCircleLines(remoteCenter.x, remoteCenter.y, pulse, C_GREEN);
+				}
+			}
+
 			DrawPlayer();
 
 			Vector2 playerCenter = { player.x + player.width/2, player.y + player.height/2 };
