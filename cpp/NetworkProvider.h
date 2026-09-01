@@ -5,46 +5,67 @@
 #include <functional>
 #include <cstdint>
 
+// ── Packet type IDs ──────────────────────────────────────────────────────────
+//  1 = PlayerStatePacket   (position / shield / score)
+//  2 = SpawnMagmaPacket    (magma spawned by host)
+//  3 = CoinPickupPacket    (coin(s) collected — adds to shared team pool)
+//  4 = TeamUpgradePacket   (team shop purchase — upgrade synced to peer)
+// ─────────────────────────────────────────────────────────────────────────────
+
 struct PlayerStatePacket {
-    uint8_t type = 1; // 1 = state
-    float x;
-    float y;
-    float vx;
-    float vy;
-    bool has_shield;
+    uint8_t  type      = 1;
+    float    x;
+    float    y;
+    float    vx;
+    float    vy;
+    bool     has_shield;
+    int32_t  score;          // sender's current score (for team score display)
 };
 
 struct SpawnMagmaPacket {
-    uint8_t type = 2; // 2 = spawn magma
-    float x;
-    float w;
-    float h;
-    float speed;
+    uint8_t type  = 2;
+    float   x;
+    float   w;
+    float   h;
+    float   speed;
 };
+
+struct CoinPickupPacket {
+    uint8_t  type  = 3;
+    int32_t  count;          // number of coins just collected by sender
+};
+
+struct TeamUpgradePacket {
+    uint8_t  type       = 4;
+    uint8_t  upgrade_id; // 0=speed  1=jump  2=shield  3=magnet
+    int32_t  new_value;  // stat value after upgrade (applied on receiver side)
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 class NetworkProvider {
 public:
     virtual ~NetworkProvider() = default;
 
-    virtual bool Init() = 0;
-    virtual void Tick() = 0;
-    virtual void Shutdown() = 0;
+    virtual bool Init()                                    = 0;
+    virtual void Tick()                                    = 0;
+    virtual void Shutdown()                                = 0;
 
-    virtual void HostGame() = 0;
-    virtual void JoinGame(const std::string& addressOrId) = 0;
-    virtual void SendPacket(const void* data, uint32_t length) = 0;
+    virtual void HostGame()                                = 0;
+    virtual void JoinGame(const std::string& addressOrId)  = 0;
+    virtual void SendPacket(const void* data, uint32_t len)= 0;
 
-    virtual bool IsHost() const = 0;
-    virtual bool IsConnected() const = 0;
-    
-    // Status message for UI
-    virtual std::string GetStatus() const = 0;
-    virtual std::string GetMyId() const = 0; // For LAN, returns local IP (or blank), for EOS returns PUID
+    virtual bool        IsHost()      const = 0;
+    virtual bool        IsConnected() const = 0;
+    virtual std::string GetStatus()   const = 0;
+    virtual std::string GetMyId()     const = 0;
 
-    // Callbacks
-    std::function<void(const PlayerStatePacket&)> onPlayerStateReceived;
-    std::function<void(const SpawnMagmaPacket&)> onMagmaSpawnReceived;
-    std::function<void(bool)> onConnectionEstablished;
+    // ── Callbacks ──
+    std::function<void(const PlayerStatePacket&)>    onPlayerStateReceived;
+    std::function<void(const SpawnMagmaPacket&)>     onMagmaSpawnReceived;
+    std::function<void(bool)>                        onConnectionEstablished;
+    std::function<void(int /*count*/)>               onCoinPickupReceived;    // team coin sync
+    std::function<void(uint8_t /*id*/, int32_t)>     onTeamUpgradeReceived;  // team shop sync
 };
 
 #endif // NETWORK_PROVIDER_H

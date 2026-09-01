@@ -183,10 +183,28 @@ void LanManager::ReceiveData() {
             onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer));
         } else if (type == 2 && onMagmaSpawnReceived && r == sizeof(SpawnMagmaPacket)) {
             onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer));
+        } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
+            auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
+            onCoinPickupReceived(pkt.count);
+        } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
+            auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
+            onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
         }
     }
 }
 
 std::string LanManager::GetMyId() const {
-    return "127.0.0.1"; // Stub for UI
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) != 0) return "127.0.0.1";
+    struct addrinfo hints = {}, *res = nullptr;
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(hostname, nullptr, &hints, &res) == 0 && res) {
+        char ip[INET_ADDRSTRLEN] = {};
+        sockaddr_in* sa = reinterpret_cast<sockaddr_in*>(res->ai_addr);
+        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+        freeaddrinfo(res);
+        return std::string(ip);
+    }
+    return "127.0.0.1";
 }

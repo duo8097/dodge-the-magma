@@ -294,7 +294,7 @@ static StartupResult RunStartupScreen() {
 // ============================================================
 //  GAME STATE
 // ============================================================
-enum class GameState { MENU, SHOP, GAME, PAUSE, GAMEOVER, SETTINGS };
+enum class GameState { MENU, MULTIPLAYER, SHOP, TEAM_SHOP, GAME, PAUSE, GAMEOVER, SETTINGS };
 
 static GameState gameState = GameState::MENU;
 
@@ -324,6 +324,10 @@ static bool remote_has_shield = false;
 static std::string login_status = "Not Logged In";
 static std::string my_account_id = "";
 static std::string join_account_id_input = "";
+
+// ---------- TEAM / MULTIPLAYER STATE ----------
+static int team_coins   = 0;  // shared coin pool between both players (multiplayer only)
+static int remote_score = 0;  // peer's score received each frame via PlayerStatePacket
 
 // dash
 static float dash_velocity = 0.0f;
@@ -398,6 +402,8 @@ static void ResetRun() {
 	remote_player_x = -1000;
 	remote_player_y = -1000;
 	remote_has_shield = false;
+	remote_score = 0;
+	if (is_multiplayer) team_coins = 0;
 	double now = NowMs();
 	next_magma_spawn = now + 300;
 	next_coin_spawn = now + 900;
@@ -619,11 +625,20 @@ static void DrawConsole() {
 
 // ---------- UI SCREENS ----------
 static void DrawHud() {
-	DrawBox(10, 10, 320, 108, BLACK, C_WHITE);
-	GText(TextFormat("SCORE: %d", score), 22, 20, 28, C_WHITE);
-	GText(TextFormat("COINS: %d", coins), 22, 52, 28, C_YELLOW);
-	GText(TextFormat("SPD: %d", player_speed), 22, 90, 20, C_BLUE);
-	GText(TextFormat("JUMPS: %d/%d", jumps_left, max_jumps), 150, 90, 20, C_GREEN);
+	if (is_multiplayer) {
+		DrawBox(10, 10, 370, 132, BLACK, C_ORANGE);
+		GText(TextFormat("SCORE: %d",             score),              22,  18, 24, C_WHITE);
+		GText(TextFormat("P2 SCORE: %d",          remote_score),       22,  46, 22, C_ORANGE);
+		GText(TextFormat("TEAM COINS: %d",         team_coins),         22,  72, 22, C_YELLOW);
+		GText(TextFormat("SPD: %d",               player_speed),       22, 106, 18, C_BLUE);
+		GText(TextFormat("JUMPS: %d/%d", jumps_left, max_jumps),      175, 106, 18, C_GREEN);
+	} else {
+		DrawBox(10, 10, 320, 108, BLACK, C_WHITE);
+		GText(TextFormat("SCORE: %d",             score),              22, 20, 28, C_WHITE);
+		GText(TextFormat("COINS: %d",             coins),              22, 52, 28, C_YELLOW);
+		GText(TextFormat("SPD: %d",               player_speed),       22, 90, 20, C_BLUE);
+		GText(TextFormat("JUMPS: %d/%d", jumps_left, max_jumps),      150, 90, 20, C_GREEN);
+	}
 }
 
 static void DrawAbilityBar() {
@@ -666,39 +681,96 @@ static void DrawAbilityBar() {
 }
 
 static void DrawInfoHub() {
-	int hubW = 220, hubH = 72;
+	int hubW = 250;
+	int hubH = is_multiplayer ? 108 : 72;
 	int hubX = WIDTH - hubW - 12, hubY = 12;
-	DrawBox(hubX, hubY, hubW, hubH, BLACK, C_WHITE);
-	GText(TextFormat("COINS: %d", coins), (float)(hubX + 16), (float)(hubY + 14), 20, C_YELLOW);
-	GText(TextFormat("SCORE: %d", score), (float)(hubX + 16), (float)(hubY + 40), 20, C_WHITE);
+	Color border = is_multiplayer ? C_ORANGE : C_WHITE;
+	DrawBox(hubX, hubY, hubW, hubH, BLACK, border);
+	GText(TextFormat("COINS: %d",  coins),        (float)(hubX + 16), (float)(hubY + 14), 20, C_YELLOW);
+	if (is_multiplayer) {
+		GText(TextFormat("TEAM:  %d",  team_coins),   (float)(hubX + 16), (float)(hubY + 38), 20, C_ORANGE);
+		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 64), 18, C_WHITE);
+		GText(TextFormat("P2:    %d",  remote_score),  (float)(hubX + 16), (float)(hubY + 84), 16, Color{210,140,60,255});
+	} else {
+		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 40), 20, C_WHITE);
+	}
 }
 
 static void DrawMenu() {
-	DrawBox(WIDTH/2 - 260, 150, 520, 480, BLACK, C_WHITE);
-	int y = 180;
+	DrawBox(WIDTH/2 - 220, 160, 440, 302, BLACK, C_WHITE);
+	int y = 188;
 	int gap = 38;
-	int tw = GMeasure("DODGE THE MAGMA", 48);
-	GText("DODGE THE MAGMA", (float)(WIDTH/2 - tw/2), (float)y, 48, C_WHITE);
-	y += 60;
-	DrawTextCentered("[ SPACE ] START", y, C_BLUE, 24);   y += gap;
-	DrawTextCentered("[ S ] SHOP",      y, C_GREEN, 24);  y += gap;
-	DrawTextCentered("[ O ] SETTINGS",  y, C_PURPLE, 24); y += gap;
-	DrawTextCentered("[ Q ] EXIT",      y, C_RED, 24);    y += gap;
-	
-	// Multiplayer UI
-	y += 10;
-	DrawTextCentered("--- MULTIPLAYER ---", y, C_ORANGE, 24); y += gap;
-	std::string netType = (g_network == &LanManager::Get()) ? "Mode: LAN (IP)" : "Mode: Online (EOS)";
-	DrawTextCentered(TextFormat("[ C ] CHANGE MODE: %s", netType.c_str()), y, C_YELLOW, 20); y += gap;
-	
-	if (!my_account_id.empty()) {
-		DrawTextCentered(TextFormat("My ID: %s", my_account_id.c_str()), y, C_GREEN, 18); y += gap;
-	}
-	DrawTextCentered("[ H ] HOST GAME", y, C_YELLOW, 20); y += gap;
-	DrawTextCentered(TextFormat("[ J ] JOIN GAME: %s", join_account_id_input.c_str()), y, C_YELLOW, 20); y += gap;
-	
-	DrawTextCentered(login_status.c_str(), y, C_WHITE, 18); y += gap;
+	int tw = GMeasure("DODGE THE MAGMA", 40);
+	GText("DODGE THE MAGMA", (float)(WIDTH/2 - tw/2), (float)y, 40, C_WHITE);
+	y += 56;
+	DrawTextCentered("[ SPACE ] START",   y, C_BLUE,   24); y += gap;
+	DrawTextCentered("[ S ] SHOP",        y, C_GREEN,  24); y += gap;
+	DrawTextCentered("[ M ] MULTIPLAYER", y, C_ORANGE, 24); y += gap;
+	DrawTextCentered("[ O ] SETTINGS",    y, C_PURPLE, 24); y += gap;
+	DrawTextCentered("[ Q ] EXIT",        y, C_RED,    24);
 }
+
+// ─── Dedicated Multiplayer screen ───────────────────────────────────────────
+static void DrawMultiplayerMenu() {
+	DrawBox(WIDTH/2 - 290, 120, 580, 470, BLACK, C_ORANGE);
+
+	int y = 150;
+	int gap = 36;
+
+	// Title
+	int tw = GMeasure("MULTIPLAYER", 38);
+	GText("MULTIPLAYER", (float)(WIDTH/2 - tw/2), (float)y, 38, C_ORANGE);
+	y += 52;
+
+	// Network mode toggle
+	std::string netLabel = (g_network == &LanManager::Get()) ? "LAN  (IP)" : "Online (EOS)";
+	DrawTextCentered(TextFormat("[ C ] MODE: %s", netLabel.c_str()), y, C_YELLOW, 20); y += gap;
+
+	// Divider
+	DrawLine(WIDTH/2 - 220, y + 6, WIDTH/2 + 220, y + 6, Color{80, 50, 20, 255}); y += 20;
+
+	// HOST button
+	bool isHosting   = g_network->IsHost() && !g_network->IsConnected();
+	bool hostReady   = g_network->IsHost() &&  g_network->IsConnected();
+	Color hostColor  = hostReady ? C_GREEN : (isHosting ? C_YELLOW : Color{180,180,80,255});
+	std::string hostLabel = hostReady   ? "[ H ] HOSTING  (client connected!)" :
+	                        isHosting   ? "[ H ] WAITING FOR CLIENT..." :
+	                                      "[ H ] HOST GAME";
+	DrawTextCentered(hostLabel.c_str(), y, hostColor, 20); y += gap;
+
+	// JOIN field with blinking cursor
+	bool isClient   = !g_network->IsHost() && g_network->IsConnected();
+	Color joinColor = isClient ? C_GREEN : Color{180,180,80,255};
+	int blinkOn     = (((int)(GetTime() * 1000)) / 500) % 2;
+	std::string joinLabel = "[ J ] JOIN: " + join_account_id_input + (blinkOn ? "|" : " ");
+	DrawTextCentered(joinLabel.c_str(), y, joinColor, 20); y += gap;
+
+	// Divider
+	DrawLine(WIDTH/2 - 220, y + 4, WIDTH/2 + 220, y + 4, Color{80, 50, 20, 255}); y += 18;
+
+	// Status
+	Color statusColor = g_network->IsConnected() ? C_GREEN : Color{160,160,160,255};
+	DrawTextCentered(login_status.c_str(), y, statusColor, 18); y += gap - 4;
+
+	// My IP (so host can share it)
+	if (!my_account_id.empty()) {
+		DrawTextCentered(TextFormat("My IP: %s", my_account_id.c_str()), y, Color{120,200,140,255}, 17);
+		y += gap - 4;
+	}
+
+	// ── Team section (visible only when connected) ───────────────────────────
+	if (g_network->IsConnected()) {
+		DrawLine(WIDTH/2 - 220, y, WIDTH/2 + 220, y, Color{80, 50, 20, 255}); y += 16;
+
+		DrawTextCentered(TextFormat("TEAM COINS: %d", team_coins), y, C_YELLOW, 22); y += gap;
+		DrawTextCentered("[ T ] TEAM SHOP", y, C_GREEN, 22); y += gap;
+		DrawTextCentered("[ SPACE ] START GAME", y, C_BLUE, 20); y += gap;
+	}
+
+	// Back
+	DrawTextCentered("[ ESC ] BACK", HEIGHT/2 + 198, C_WHITE, 20);
+}
+
 
 static void DrawShop() {
 	DrawBox(WIDTH/2 - 330, 110, 660, 480, BLACK, C_WHITE);
@@ -728,8 +800,52 @@ static void DrawShop() {
 		GText(costTxt.c_str(), r.x + r.width - cw - 18, r.y + 23, 20, C_YELLOW);
 	}
 
-	DrawTextCentered("[ ESC ] BACK",                    520, C_WHITE,  28);
+DrawTextCentered("[ ESC ] BACK",                    520, C_WHITE,  28);
 	DrawTextCentered(TextFormat("COINS: %d", coins),    550, C_YELLOW, 28);
+}
+
+// ============================================================
+//  TEAM SHOP SCREEN
+// ============================================================
+static void DrawTeamShop() {
+	DrawBox(WIDTH/2 - 330, 110, 660, 480, BLACK, C_ORANGE);
+	Vector2 mouse = GetMousePosition();
+
+	Rectangle itemRects[SHOP_COUNT];
+	for (int i = 0; i < SHOP_COUNT; i++)
+		itemRects[i] = {(float)(WIDTH/2 - 250), (float)(170 + i * 85), 500, 70};
+
+	DrawTextCentered("=== TEAM SHOP ===", 130, C_YELLOW, 28);
+
+	for (int i = 0; i < SHOP_COUNT; i++) {
+		ShopItem& item = SHOP_ITEMS[i];
+		Rectangle r = itemRects[i];
+		bool hovered = CheckCollisionPointRec(mouse, r);
+		Color fill    = hovered ? Color{50,60,82,255}   : Color{28,28,40,255};
+		Color border   = hovered ? item.color            : C_ORANGE;
+		DrawRectangleRounded(r, 0.17f, 16, fill);
+		DrawRectangleRoundedLines(r, 0.17f, 16, border);
+
+		std::string iconTxt = std::string("[") + item.label + "]";
+		GText(iconTxt.c_str(), r.x + 18, r.y + 16, 20, item.color);
+		GText(item.title, r.x + 78, r.y + 12, 28, C_WHITE);
+		GText(item.desc,  r.x + 78, r.y + 38, 20, Color{180,180,190,255});
+		std::string costTxt = std::to_string(item.cost) + " team coins";
+		int cw = GMeasure(costTxt.c_str(), 20);
+		GText(costTxt.c_str(), r.x + r.width - cw - 18, r.y + 23, 20, C_YELLOW);
+	}
+
+	DrawTextCentered("[ ESC ] BACK",                       520, C_WHITE,  28);
+	DrawTextCentered(TextFormat("TEAM COINS: %d", team_coins), 550, C_YELLOW, 28);
+
+	// Show P1/P2 labels
+	if (g_network->IsHost()) {
+		DrawTextCentered("YOU: P1 (HOST)",  580, C_BLUE,   18);
+		DrawTextCentered("PEER: P2",        605, C_ORANGE, 18);
+	} else {
+		DrawTextCentered("YOU: P2 (CLIENT)", 580, C_ORANGE, 18);
+		DrawTextCentered("PEER: P1",        605, C_BLUE,   18);
+	}
 }
 
 // ============================================================
@@ -890,6 +1006,7 @@ int main() {
 			remote_player_x = packet.x;
 			remote_player_y = packet.y;
 			remote_has_shield = packet.has_shield;
+			remote_score = packet.score;
 		};
 		
 		g_network->onMagmaSpawnReceived = [](const SpawnMagmaPacket& packet) {
@@ -904,6 +1021,19 @@ int main() {
 			} else {
 				is_multiplayer = false;
 			}
+		};
+
+		g_network->onCoinPickupReceived = [](int count) {
+			team_coins += count;
+		};
+		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue) {
+			switch (upgradeId) {
+				case 0: player_speed = newValue; break;
+				case 1: jump_strength = newValue; break;
+				case 2: shield_cooldown_real = newValue; break;
+				case 3: magnet_level = newValue; break;
+			}
+			QueueSave();
 		};
 	};
 	BindNetworkCallbacks();
@@ -1027,6 +1157,7 @@ int main() {
 			case GameState::MENU: {
 				if (IsKeyPressed(KEY_SPACE)) ResetRun();
 				if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
+				if (IsKeyPressed(KEY_M)) gameState = GameState::MULTIPLAYER;
 				if (IsKeyPressed(KEY_O)) {
 					gameState = GameState::SETTINGS;
 					settings_fullscreen = g_fullscreen;
@@ -1041,40 +1172,6 @@ int main() {
 					settings_active_field = 0;
 				}
 				if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
-				
-				// Multiplayer Input
-				if (IsKeyPressed(KEY_C)) {
-					if (g_network == &LanManager::Get()) {
-						g_network = &EOSManager::Get();
-						g_network->Init();
-						BindNetworkCallbacks();
-					} else {
-						g_network = &LanManager::Get();
-						g_network->Init();
-						BindNetworkCallbacks();
-					}
-				}
-				if (IsKeyPressed(KEY_H)) {
-					g_network->HostGame();
-				}
-				// Type to join – scoped block
-				{
-					int ch = GetCharPressed();
-					while (ch > 0) {
-						if (ch >= 32 && ch <= 125) {
-							join_account_id_input += (char)ch;
-						}
-						ch = GetCharPressed();
-					}
-					if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
-						join_account_id_input.pop_back();
-					}
-					if (IsKeyPressed(KEY_J)) {
-						g_network->JoinGame(join_account_id_input);
-					}
-				}
-				login_status = g_network->GetStatus();
-				my_account_id = g_network->GetMyId();
 				break;
 			}
 			case GameState::SHOP: {
@@ -1122,6 +1219,75 @@ int main() {
 			}
 			case GameState::SETTINGS: {
 				break; // handled elsewhere
+			}
+			case GameState::MULTIPLAYER: {
+				if (g_network->IsConnected()) {
+					if (IsKeyPressed(KEY_SPACE)) ResetRun();
+					if (IsKeyPressed(KEY_T)) gameState = GameState::TEAM_SHOP;
+				}
+				if (IsKeyPressed(KEY_C)) {
+					if (g_network == &LanManager::Get()) {
+						g_network = &EOSManager::Get();
+						g_network->Init();
+						BindNetworkCallbacks();
+					} else {
+						g_network = &LanManager::Get();
+						g_network->Init();
+						BindNetworkCallbacks();
+					}
+				}
+				if (IsKeyPressed(KEY_H)) {
+					g_network->HostGame();
+				}
+				{
+					int ch = GetCharPressed();
+					while (ch > 0) {
+						if (ch >= 32 && ch <= 125) {
+							join_account_id_input += (char)ch;
+						}
+						ch = GetCharPressed();
+					}
+					if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
+						join_account_id_input.pop_back();
+					}
+					if (IsKeyPressed(KEY_J)) {
+						g_network->JoinGame(join_account_id_input);
+					}
+				}
+				login_status = g_network->GetStatus();
+				my_account_id = g_network->GetMyId();
+				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MENU;
+				break;
+			}
+			case GameState::TEAM_SHOP: {
+				auto buyTeam = [](uint8_t id, int cost, int32_t& stat, int delta) {
+					if (team_coins >= cost) {
+						team_coins -= cost;
+						stat += delta;
+						QueueSave();
+						TeamUpgradePacket pkt;
+						pkt.type = 4;
+						pkt.upgrade_id = id;
+						pkt.new_value = stat;
+						g_network->SendPacket(&pkt, sizeof(pkt));
+					}
+				};
+				if (IsKeyPressed(KEY_ONE)   && team_coins >= 20) { buyTeam(0, 20, player_speed, 1); }
+				if (IsKeyPressed(KEY_TWO)   && team_coins >= 30) { buyTeam(1, 30, jump_strength, -2); }
+				if (IsKeyPressed(KEY_THREE) && team_coins >= 100) {
+					team_coins -= 100;
+					shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
+					shield_time_real += 10;
+					QueueSave();
+					TeamUpgradePacket pkt;
+					pkt.type = 4;
+					pkt.upgrade_id = 2;
+					pkt.new_value = (int32_t)shield_cooldown_real;
+					g_network->SendPacket(&pkt, sizeof(pkt));
+				}
+				if (IsKeyPressed(KEY_FOUR)  && team_coins >= 150) { buyTeam(3, 150, magnet_level, 1); }
+				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MULTIPLAYER;
+				break;
 			}
 			}
 			if (gameState == GameState::GAME && IsKeyReleased(KEY_SPACE)) jump_hold_time = 0;
@@ -1234,6 +1400,7 @@ int main() {
 				packet.vx = player_vx;
 				packet.vy = velocity_y;
 				packet.has_shield = shield;
+				packet.score = score;
 				g_network->SendPacket(&packet, sizeof(packet));
 			}
 
@@ -1265,7 +1432,7 @@ int main() {
 			}
 			if (!died) magma_list = nextMagma;
 
-			// coin update with magnet logic
+// coin update with magnet logic
 			if (!died) {
 				float magnetRadius = 150.0f + magnet_level * 50.0f;
 				float magnetSpeed  = 10.0f  + magnet_level * 3.0f;
@@ -1293,7 +1460,21 @@ int main() {
 					else if (c.y > HEIGHT) continue;
 					else nextCoins.push_back(c);
 				}
-				if (collected) { coins += collected; QueueSave(); }
+				if (collected) { 
+					if (is_multiplayer) {
+						team_coins += collected;
+						if (g_network->onCoinPickupReceived) {
+							g_network->onCoinPickupReceived(collected);
+							CoinPickupPacket pkt;
+							pkt.type = 3;
+							pkt.count = collected;
+							g_network->SendPacket(&pkt, sizeof(pkt));
+						}
+					} else {
+						coins += collected; 
+						QueueSave(); 
+					}
+				}
 				coin_list = nextCoins;
 			}
 
@@ -1358,6 +1539,10 @@ int main() {
 		} else if (gameState == GameState::GAMEOVER) {
 			DrawGameOver();
 			DrawInfoHub();
+		} else if (gameState == GameState::MULTIPLAYER) {
+			DrawMultiplayerMenu();
+		} else if (gameState == GameState::TEAM_SHOP) {
+			DrawTeamShop();
 		}
 
 		if (console_open) DrawConsole();

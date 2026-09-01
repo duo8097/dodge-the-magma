@@ -1,137 +1,177 @@
 # Dodge the Magma
 
-Một game arcade nhỏ: người chơi né magma rơi từ trên xuống, nhặt coin, dùng
-dash và shield để sống lâu nhất có thể.
+A small arcade game where you dodge falling magma, collect coins, and use dashes and shields to survive as long as possible.
 
-Repo này hiện có **2 bản**:
+Supports **LAN and online multiplayer**, including shared team coins, a team shop, and team score tracking.
 
-| Thư mục | Ngôn ngữ / Engine | Trạng thái |
-|---|---|---|
-| [`python/`](python) | Python + `pygame-ce` | Bản gốc, đầy đủ tính năng |
-| [`cpp/`](cpp) | C++ + `raylib` | Đang port từ bản Python, chưa đầy đủ 100% |
-
-> Bản C++ đang trong quá trình port sang từ bản Python nên vẫn giữ song song
-> cả hai — chưa xoá bản Python vì còn vài phần chưa port xong hoặc để tương thích trên 1 số máy
-
-## Features (chung cho cả 2 bản)
-- Di chuyển trái/phải mượt với cảm giác quán tính nhẹ.
-- Jump có `double jump`, `variable jump`, `jump buffer`, và `coyote time`.
-- Dash có cooldown và bật nảy khi chạm tường.
-- Shield có thời gian hoạt động, cooldown, và hiệu ứng hình ảnh.
-- Magma và coin spawn theo pattern thay vì chỉ random đơn giản.
-- Có `shop`, `game over menu`, save/load coin và upgrade.
-- Có startup screen để chọn fullscreen, preset resolution, hoặc custom resolution.
-- Có `pause menu` bằng `ESC` khi đang chơi.
-- Có cheat console (`` ` `` để mở).
-
-## Bản Python (`python/`)
-Bản gốc, đầy đủ tính năng, chạy bằng `pygame-ce`.
+## Building (C++ / raylib)
 
 ### Requirements
-- Python `3.14+`
-- `pygame-ce`
 
-### Install
-```bash
-cd "python"
-uv sync            # nếu dùng uv
-# hoặc
-pip install -e .   # nếu dùng virtualenv thường
-```
+* C++17-compatible compiler (GCC, Clang, or MSVC)
+* CMake 3.15 or newer
+* **Windows:** No additional dependencies are required. Winsock2 is included with MSVC/MinGW.
+* **Linux:** The following packages are required:
 
-### Run
-```bash
-python "dodge_the_magma_desktop_py.py"
-```
+  * `build-essential`
+  * `libgl1-mesa-dev`
+  * `libx11-dev`
+  * `libxrandr-dev`
+  * `libxi-dev`
+  * `libxcursor-dev`
+  * `libxinerama-dev`
 
-## Bản C++ (`cpp/`)
-Bản port sang C++ dùng `raylib`, đang phát triển song song, chưa port hết
-100% tính năng của bản Python.
+### Build & Run
 
-### Requirements
-- Trình biên dịch C++17 trở lên (GCC / Clang / MSVC)
-- CMake `3.15+`
-- Kết nối mạng lúc `cmake ..` lần đầu (để tự tải raylib nếu máy chưa cài sẵn)
-- Trên Linux cần thêm: `build-essential`, `libgl1-mesa-dev`, `libx11-dev`,
-  `libxrandr-dev`, `libxi-dev`, `libxcursor-dev`, `libxinerama-dev`
-
-### Build
 ```bash
 cd cpp
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j
 ```
-File thực thi nằm ở `cpp/build/bin/dodge_magma` (`.exe` trên Windows).
 
-### Run
+Run the game:
+
+**Linux**
+
 ```bash
-./build/bin/dodge_magma
+./bin/dodge_magma
 ```
 
-## Controls (áp dụng cho cả 2 bản)
-### Menu
-- `SPACE`: Start game
-- `S`: Open shop
-- `O`: Open settings
-- `Q`: Exit game
+**Windows**
+
+```powershell
+.\bin\dodge_magma.exe
+```
+
+## Multiplayer
+
+Press **`M`** from the main menu to open the dedicated **Multiplayer** screen.
+
+### Connecting
+
+| Key   | Action                                            |
+| ----- | ------------------------------------------------- |
+| `C`   | Toggle between **LAN (UDP)** and **Online (EOS)** |
+| `H`   | Host a game                                       |
+| `J`   | Join a game (enter the host IP first)             |
+| `T`   | Open the **Team Shop** (when connected)           |
+| `ESC` | Return to the main menu                           |
+
+Once connected, press **`SPACE`** to start the game together.
+
+### Team Features
+
+| Feature        | Details                                                                                                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Team Coins** | Players share a single coin pool. When either player collects a coin, a `CoinPickupPacket` is sent to the peer. Both sides add the coins to `team_coins`. Coins are **not** added to the players' personal balances during multiplayer. |
+| **Team Shop**  | Open the shop with **`T`** from the Multiplayer screen while connected. Purchases are deducted from `team_coins` and applied to **both** players. The buyer sends a `TeamUpgradePacket` so the peer receives the same stat change.      |
+| **Team Score** | The HUD displays both your score and the remote player's score, making the team's combined performance easy to track.                                                                                                                   |
+| **Team HUD**   | During multiplayer, the HUD displays `SCORE`, `P2 SCORE`, and `TEAM COINS`.                                                                                                           
+## Controls
+
+### Main Menu
+
+| Key     | Action                      |
+| ------- | --------------------------- |
+| `SPACE` | Start a solo game           |
+| `S`     | Open the shop               |
+| `M`     | Open the Multiplayer screen |
+| `O`     | Open settings               |
+| `Q`     | Exit                        |
+
+### Multiplayer Screen
+
+| Key   | Action                              |
+| ----- | ----------------------------------- |
+| `C`   | Toggle between LAN and Online       |
+| `H`   | Host a game                         |
+| `J`   | Join a game (enter the IP first)    |
+| `T`   | Open the Team Shop (when connected) |
+| `ESC` | Return to the main menu             |
+
+### Team Shop
+
+| Key   | Action                           |
+| ----- | -------------------------------- |
+| `1`   | Speed +1 (20 team coins)         |
+| `2`   | Jump -2 (30 team coins)          |
+| `3`   | Shield upgrade (100 team coins)  |
+| `4`   | Magnet upgrade (150 team coins)  |
+| `ESC` | Return to the Multiplayer screen |
 
 ### In Game
-- `A` / `D` (hoặc mũi tên trái/phải): Move
-- `SPACE`: Jump / double jump / hold to jump higher
-- `Q`: Dash
-- `E`: Activate shield
-- `ESC`: Pause / resume
-- `` ` ``: Open cheat console
 
-### Shop
-- `1`: Speed upgrade
-- `2`: Jump upgrade
-- `3`: Shield upgrade
-- `ESC`: Back to menu
+| Key                     | Action                                      |
+| ----------------------- | ------------------------------------------- |
+| `A` / `D` or Arrow Keys | Move                                        |
+| `SPACE`                 | Jump / double jump / hold for a higher jump |
+| `Q`                     | Dash                                        |
+| `E`                     | Activate shield                             |
+| `ESC`                   | Pause                                       |
+| `` ` ``                 | Open the cheat console                      |
 
-### Pause
-- `ESC`: Resume
-- `M`: Back to menu
-- `Q`: Save and quit
+### Solo Shop
 
-### Game Over
-- `SPACE`: Retry
-- `M`: Back to menu
-- `S`: Open shop
-- `Q`: Exit game
+| Key   | Action                  |
+| ----- | ----------------------- |
+| `1`   | Speed upgrade           |
+| `2`   | Jump upgrade            |
+| `3`   | Shield upgrade          |
+| `4`   | Magnet upgrade          |
+| `ESC` | Return to the main menu |
 
 ## Save System
-- Bản Python lưu vào `save.json`.
-- Bản C++ lưu vào `save.txt` (định dạng `key=value` đơn giản, không phụ
-  thuộc thư viện JSON ngoài).
 
-Cả 2 bản đều lưu: coins, player speed, jump strength, shield cooldown,
-shield active time — và đều dùng cơ chế `queue + autosave` để tránh ghi file
-quá thường xuyên khi nhặt nhiều coin.
+Game data is saved to `save.txt` using a simple `key=value` format, with no external JSON library required.
+
+The save system stores:
+
+* Coins
+* Player speed
+* Jump strength
+* Shield cooldown
+* Shield active time
+* Magnet level
+* Target FPS
+
+A queue-based autosave mechanism is used to avoid writing to disk too frequently.
 
 ## Cheat Console
-Nhấn `` ` `` để mở console trong game (cả 2 bản).
 
-Các lệnh hiện có:
-- `help`
-- `coin [n]`
-- `speed [n]`
-- `jump [n]`
-- `god`
-- `reset [coins/speed/shield/all]`
-- `save`
-- `stats`
-- `exit`
+Press `` ` `` to open the cheat console.
+
+Available commands:
+
+| Command                                 | Description              |
+| --------------------------------------- | ------------------------ |
+| `help`                                  | List available commands  |
+| `coin [n]`                              | Add coins (default: 100) |
+| `speed [n]`                             | Add speed (default: 2)   |
+| `jump [n]`                              | Add jump (default: 2)    |
+| `god`                                   | Enable invincibility     |
+| `reset [coins/speed/shield/magnet/all]` | Reset selected stats     |
+| `save`                                  | Force a save             |
+| `stats`                                 | Show current stats       |
+| `exit`                                  | Quit the game            |
 
 ## Project Structure
-```
+
+```text
 Dodge-the-Magma/
-├── python/          # bản gốc Python + pygame-ce
-├── cpp/             # bản port C++ + raylib (đang port dở)
-└── .gitignore
+├── cpp/                                  # C++ port (active development)
+│   ├── dodge_the_magma_desktop_cpp.cpp  # Main game
+│   ├── NetworkProvider.h                 # Network interface and packet definitions
+│   ├── LanManager.h / .cpp               # LAN UDP implementation
+│   ├── EOSManager.h / .cpp               # Online EOS implementation
+│   └── build/                            # Build output
+│       └── bin/dodge_magma(.exe)
+├── python (deprecated)/                   # Original Python + pygame-ce version
+└── third-party-api/                      # EOS SDK headers
 ```
 
-## Warning
-- Nếu máy bạn yếu, hãy dùng bản c++.
-- Nếu có thể, hãy dùng bản py vì nó là bản gốc.
+## Legacy Python Version
+
+The original Python + `pygame-ce` version is kept in `python (deprecated)/` for reference.
+
+It is **no longer maintained**. The C++ version has feature parity with the Python version and additionally provides multiplayer support.
