@@ -1165,12 +1165,9 @@ int main() {
 		
 		g_network->onReadyStatusReceived = [](const ReadyStatusPacket& packet) {
 			if (g_network->IsHost()) {
-				// Find player by name (we need to know who sent it)
-				// For simplicity, we'll broadcast the updated list
-				// In a real implementation, we'd track by socket/connection
-				// For now, toggle the first non-host player's ready status
+				// Find player by name from packet
 				for (auto& p : lobby_players) {
-					if (!p.isHost) {
+					if (p.name == packet.name) {
 						p.ready = packet.ready;
 						break;
 					}
@@ -1459,6 +1456,8 @@ login_status = g_network->GetStatus();
 					lobby_ready = !lobby_ready;
 					ReadyStatusPacket readyPkt;
 					readyPkt.ready = lobby_ready;
+					strncpy(readyPkt.name, my_lobby_name.c_str(), 31);
+					readyPkt.name[31] = '\0';
 					g_network->SendPacket(&readyPkt, sizeof(readyPkt));
 				}
 			}

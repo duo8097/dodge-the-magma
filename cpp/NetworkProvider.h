@@ -65,6 +65,7 @@ struct PlayerListPacket {
 struct ReadyStatusPacket {
     uint8_t type = 7;
     bool    ready;
+    char    name[32];
 };
 
 struct StartGamePacket {
