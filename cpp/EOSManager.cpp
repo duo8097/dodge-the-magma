@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cstring>
 
+#define _CRT_SECURE_NO_WARNINGS
+
 // PLACEHOLDER CREDENTIALS
 static const char* EOS_PRODUCT_ID = "00000000000000000000000000000000";
 static const char* EOS_SANDBOX_ID = "00000000000000000000000000000000";

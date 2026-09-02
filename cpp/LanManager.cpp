@@ -2,7 +2,6 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
-#include <netdb.h>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -16,6 +15,7 @@
     #include <sys/socket.h>
     #include <arpa/inet.h>
     #include <netinet/in.h>
+    #include <netdb.h>      // <-- dời vào đây
     #include <unistd.h>
     #include <fcntl.h>
     typedef int socket_t;
