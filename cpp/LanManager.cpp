@@ -76,6 +76,11 @@ void LanManager::Shutdown() {
 void LanManager::HostGame() {
     m_isHost = true;
     m_statusMessage = "Hosting LAN (UDP)...";
+    m_players.clear();
+    
+    // Add host as first player
+    std::string myName = "Player1";
+    AddPlayer(myName.c_str(), true);
     
     if (m_serverSocket != INVALID_SOCKET_VAL) {
         CLOSE_SOCKET((socket_t)m_serverSocket);
@@ -133,9 +138,12 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_isConnected = true;
     m_statusMessage = "Connected to LAN (UDP)!";
     
-    // Send a dummy heartbeat/join packet so the host knows our address
-    uint8_t joinPacket[1] = {99};
-    send(sock, (const char*)joinPacket, 1, 0);
+    // Send a PlayerJoinPacket so the host knows our name
+    PlayerJoinPacket joinPkt;
+    std::string myName = "Player" + std::to_string(rand() % 100 + 2);
+    strncpy(joinPkt.name, myName.c_str(), 31);
+    joinPkt.name[31] = '\0';
+    send(sock, (const char*)&joinPkt, sizeof(joinPkt), 0);
     
     if (onConnectionEstablished) onConnectionEstablished(true);
 }
@@ -151,13 +159,34 @@ void LanManager::AcceptClients() {
     
     int r = recvfrom(server, buffer, sizeof(buffer), 0, (struct sockaddr*)&clientAddr, &clientLen);
     if (r > 0) {
-        // We received a packet! We can now "connect" the server socket to this client
-        // so we can just use send() instead of sendto().
-        connect(server, (struct sockaddr*)&clientAddr, clientLen);
+        uint8_t type = buffer[0];
+        if (type == 5 && r == sizeof(PlayerJoinPacket)) {
+            // We received a PlayerJoinPacket! 
+            PlayerJoinPacket* joinPkt = reinterpret_cast<PlayerJoinPacket*>(buffer);
+            
+            // Connect the server socket to this client
+            connect(server, (struct sockaddr*)&clientAddr, clientLen);
+            
+            // Add player to list
+            AddPlayer(joinPkt->name, false);
+            
+            m_isConnected = true;
+            m_statusMessage = "Client Connected (UDP)!";
+            if (onConnectionEstablished) onConnectionEstablished(true);
+            
+            // Send updated player list to all (just this client for now)
+            SendPlayerList();
+            return;
+        }
         
-        m_isConnected = true;
-        m_statusMessage = "Client Connected (UDP)!";
-        if (onConnectionEstablished) onConnectionEstablished(true);
+        // If we get here without a join packet, it might be a reconnect or something else
+        // We can still connect if we already have a client
+        if (m_players.size() > 1) {
+            connect(server, (struct sockaddr*)&clientAddr, clientLen);
+            m_isConnected = true;
+            m_statusMessage = "Client Connected (UDP)!";
+            if (onConnectionEstablished) onConnectionEstablished(true);
+        }
     }
 }
 
@@ -190,8 +219,52 @@ void LanManager::ReceiveData() {
         } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
             auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
             onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
+        } else if (type == 5 && onPlayerJoinReceived && r == sizeof(PlayerJoinPacket)) {
+            onPlayerJoinReceived(*reinterpret_cast<PlayerJoinPacket*>(buffer));
+        } else if (type == 6 && onPlayerListReceived && r == sizeof(PlayerListPacket)) {
+            onPlayerListReceived(*reinterpret_cast<PlayerListPacket*>(buffer));
+        } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
+            onReadyStatusReceived(*reinterpret_cast<ReadyStatusPacket*>(buffer));
+        } else if (type == 8 && onStartGameReceived && r == sizeof(StartGamePacket)) {
+            onStartGameReceived(*reinterpret_cast<StartGamePacket*>(buffer));
         }
     }
+}
+
+void LanManager::AddPlayer(const char* name, bool isHost) {
+    if (m_players.size() >= 4) return;
+    ConnectedPlayer p;
+    strncpy(p.name, name, 31);
+    p.name[31] = '\0';
+    p.ready = false;
+    p.isHost = isHost;
+    m_players.push_back(p);
+}
+
+void LanManager::RemovePlayer(int index) {
+    if (index >= 0 && index < (int)m_players.size()) {
+        m_players.erase(m_players.begin() + index);
+    }
+}
+
+int LanManager::FindPlayerByName(const char* name) {
+    for (size_t i = 0; i < m_players.size(); ++i) {
+        if (strcmp(m_players[i].name, name) == 0) return (int)i;
+    }
+    return -1;
+}
+
+void LanManager::SendPlayerList() {
+    if (!m_isHost) return;
+    PlayerListPacket pkt;
+    pkt.count = (uint8_t)m_players.size();
+    for (size_t i = 0; i < m_players.size(); ++i) {
+        strncpy(pkt.players[i].name, m_players[i].name, 31);
+        pkt.players[i].name[31] = '\0';
+        pkt.players[i].ready = m_players[i].ready;
+        pkt.players[i].isHost = m_players[i].isHost;
+    }
+    SendPacket(&pkt, sizeof(pkt));
 }
 
 std::string LanManager::GetMyId() const {

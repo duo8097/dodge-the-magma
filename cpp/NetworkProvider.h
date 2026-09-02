@@ -10,6 +10,10 @@
 //  2 = SpawnMagmaPacket    (magma spawned by host)
 //  3 = CoinPickupPacket    (coin(s) collected — adds to shared team pool)
 //  4 = TeamUpgradePacket   (team shop purchase — upgrade synced to peer)
+//  5 = PlayerJoinPacket    (client sends to host on join)
+//  6 = PlayerListPacket    (host sends to all with player list & ready status)
+//  7 = ReadyStatusPacket   (client toggles ready state)
+//  8 = StartGamePacket     (host signals all to start game)
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PlayerStatePacket {
@@ -41,6 +45,32 @@ struct TeamUpgradePacket {
     int32_t  new_value;  // stat value after upgrade (applied on receiver side)
 };
 
+struct PlayerJoinPacket {
+    uint8_t  type = 5;
+    char     name[32];
+};
+
+struct PlayerInfo {
+    char     name[32];
+    bool     ready;
+    bool     isHost;
+};
+
+struct PlayerListPacket {
+    uint8_t type = 6;
+    uint8_t count;
+    PlayerInfo players[4];
+};
+
+struct ReadyStatusPacket {
+    uint8_t type = 7;
+    bool    ready;
+};
+
+struct StartGamePacket {
+    uint8_t type = 8;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 class NetworkProvider {
@@ -66,6 +96,10 @@ public:
     std::function<void(bool)>                        onConnectionEstablished;
     std::function<void(int /*count*/)>               onCoinPickupReceived;    // team coin sync
     std::function<void(uint8_t /*id*/, int32_t)>     onTeamUpgradeReceived;  // team shop sync
+    std::function<void(const PlayerJoinPacket&)>     onPlayerJoinReceived;
+    std::function<void(const PlayerListPacket&)>     onPlayerListReceived;
+    std::function<void(const ReadyStatusPacket&)>    onReadyStatusReceived;
+    std::function<void(const StartGamePacket&)>      onStartGameReceived;
 };
 
 #endif // NETWORK_PROVIDER_H

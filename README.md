@@ -50,15 +50,27 @@ Press **`M`** from the main menu to open the dedicated **Multiplayer** screen.
 
 ### Connecting
 
-| Key   | Action                                            |
-| ----- | ------------------------------------------------- |
+| Key   | Action                                        |
+| ----- | --------------------------------------------- |
 | `C`   | Toggle between **LAN (UDP)** and **Online (EOS)** |
-| `H`   | Host a game                                       |
-| `J`   | Join a game (enter the host IP first)             |
-| `T`   | Open the **Team Shop** (when connected)           |
-| `ESC` | Return to the main menu                           |
+| `H`   | Host a game                                   |
+| `J`   | Start entering the host **IP** (to join)      |
+| `T`   | Open the **Team Shop** (when connected)       |
+| `ESC` | Return to the main menu                       |
 
-Once connected, press **`SPACE`** to start the game together.
+**To join:** press **`J`** to start typing the host's IP address, then press **`Enter`** to connect. Press **`ESC`** while typing to cancel.
+
+### Lobby (Ready-up flow)
+
+Once a client connects, both players are taken to the **Lobby** screen where a list of joined players and their ready status is shown. The game will not start until every player is ready.
+
+| Key     | Action                                            |
+| ------- | ------------------------------------------------- |
+| `R`     | Toggle ready / unready (client only)              |
+| `SPACE` | Start the game (host only, when **all** ready)    |
+| `ESC`   | Leave the lobby and return to the Multiplayer screen |
+
+After everyone has readied up, the **host** presses **`SPACE`** to launch the game together.
 
 ### Team Features
 
@@ -86,9 +98,18 @@ Once connected, press **`SPACE`** to start the game together.
 | ----- | ----------------------------------- |
 | `C`   | Toggle between LAN and Online       |
 | `H`   | Host a game                         |
-| `J`   | Join a game (enter the IP first)    |
+| `J`   | Start entering the host IP to join  |
+| `Enter` | Confirm IP and join                 |
 | `T`   | Open the Team Shop (when connected) |
 | `ESC` | Return to the main menu             |
+
+### Lobby
+
+| Key     | Action                                          |
+| ------- | ----------------------------------------------- |
+| `R`     | Toggle ready / unready (client only)            |
+| `SPACE` | Start the game (host only, when all ready)      |
+| `ESC`   | Leave the lobby back to the Multiplayer screen  |
 
 ### Team Shop
 

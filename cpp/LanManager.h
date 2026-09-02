@@ -33,8 +33,19 @@ private:
     size_t m_serverSocket = 0;
     size_t m_clientSocket = 0;
     
+    struct ConnectedPlayer {
+        char name[32];
+        bool ready = false;
+        bool isHost = false;
+    };
+    std::vector<ConnectedPlayer> m_players;
+    
     void ReceiveData();
     void AcceptClients();
+    void SendPlayerList();
+    void AddPlayer(const char* name, bool isHost);
+    void RemovePlayer(int index);
+    int FindPlayerByName(const char* name);
 };
 
 #endif // LAN_MANAGER_H

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 #include "EOSManager.h"
 #include "LanManager.h"
@@ -295,7 +296,7 @@ static StartupResult RunStartupScreen() {
 // ============================================================
 //  GAME STATE
 // ============================================================
-enum class GameState { MENU, MULTIPLAYER, SHOP, TEAM_SHOP, GAME, PAUSE, GAMEOVER, SETTINGS };
+enum class GameState { MENU, MULTIPLAYER, LOBBY, SHOP, TEAM_SHOP, GAME, PAUSE, GAMEOVER, SETTINGS };
 
 static GameState gameState = GameState::MENU;
 
@@ -329,6 +330,17 @@ static std::string join_account_id_input = "";
 // ---------- TEAM / MULTIPLAYER STATE ----------
 static int team_coins   = 0;  // shared coin pool between both players (multiplayer only)
 static int remote_score = 0;  // peer's score received each frame via PlayerStatePacket
+
+// ---------- LOBBY STATE ----------
+struct LobbyPlayer {
+	std::string name;
+	bool ready = false;
+	bool isHost = false;
+};
+static std::vector<LobbyPlayer> lobby_players;
+static bool in_lobby = false;
+static bool lobby_ready = false;
+static std::string my_lobby_name = "";
 
 // dash
 static float dash_velocity = 0.0f;
@@ -735,8 +747,8 @@ static void DrawMultiplayerMenu() {
 	bool hostReady   = g_network->IsHost() &&  g_network->IsConnected();
 	Color hostColor  = hostReady ? C_GREEN : (isHosting ? C_YELLOW : Color{180,180,80,255});
 	std::string hostLabel = hostReady   ? "[ H ] HOSTING  (client connected!)" :
-	                        isHosting   ? "[ H ] WAITING FOR CLIENT..." :
-	                                      "[ H ] HOST GAME";
+							isHosting   ? "[ H ] WAITING FOR CLIENT..." :
+										  "[ H ] HOST GAME";
 	DrawTextCentered(hostLabel.c_str(), y, hostColor, 20); y += gap;
 
 	// JOIN field with blinking cursor
@@ -778,6 +790,59 @@ static void DrawMultiplayerMenu() {
 
 	// Back
 	DrawTextCentered("[ ESC ] BACK", HEIGHT/2 + 198, C_WHITE, 20);
+}
+
+
+static void DrawLobbyMenu() {
+	DrawBox(WIDTH/2 - 290, 120, 580, 470, BLACK, C_GREEN);
+
+	int y = 150;
+	int gap = 36;
+
+	// Title
+	int tw = GMeasure("LOBBY", 38);
+	GText("LOBBY", (float)(WIDTH/2 - tw/2), (float)y, 38, C_GREEN);
+	y += 52;
+
+	// Player list
+	for (size_t i = 0; i < lobby_players.size(); ++i) {
+		const auto& p = lobby_players[i];
+		std::string readyStr = p.ready ? "[READY]" : "[NOT READY]";
+		Color readyColor = p.ready ? C_GREEN : C_RED;
+		std::string hostStr = p.isHost ? " (HOST)" : "";
+		std::string line = p.name + hostStr + " - " + readyStr;
+		DrawTextCentered(line.c_str(), y, (p.name == my_lobby_name) ? C_YELLOW : C_WHITE, 22);
+		y += gap - 4;
+	}
+
+	// Empty slots
+	for (size_t i = lobby_players.size(); i < 4; ++i) {
+		DrawTextCentered("[ waiting for player... ]", y, Color{100,100,100,255}, 20);
+		y += gap - 4;
+	}
+
+	DrawLine(WIDTH/2 - 220, y, WIDTH/2 + 220, y, Color{80, 50, 20, 255}); y += 18;
+
+	// Ready toggle for non-host
+	if (!g_network->IsHost()) {
+		std::string readyLabel = lobby_ready ? "[ R ] UNREADY" : "[ R ] READY";
+		Color readyColor = lobby_ready ? C_GREEN : C_ORANGE;
+		DrawTextCentered(readyLabel.c_str(), y, readyColor, 22); y += gap;
+	} else {
+		// Host sees if all ready
+		bool allReady = true;
+		for (const auto& p : lobby_players) {
+			if (!p.ready) { allReady = false; break; }
+		}
+		if (allReady && lobby_players.size() > 1) {
+			DrawTextCentered("[ SPACE ] START GAME", y, C_BLUE, 22); y += gap;
+		} else {
+			DrawTextCentered("Waiting for all players to ready...", y, Color{180,180,80,255}, 20); y += gap;
+		}
+	}
+
+	// Back
+	DrawTextCentered("[ ESC ] LEAVE LOBBY", HEIGHT/2 + 198, C_WHITE, 20);
 }
 
 
@@ -1026,9 +1091,15 @@ int main() {
 		g_network->onConnectionEstablished = [](bool connected) {
 			if (connected) {
 				is_multiplayer = true;
-				ResetRun();
+				// Enter lobby when connected
+				in_lobby = true;
+				lobby_ready = false;
+				gameState = GameState::LOBBY;
 			} else {
 				is_multiplayer = false;
+				in_lobby = false;
+				lobby_players.clear();
+				gameState = GameState::MULTIPLAYER;
 			}
 		};
 
@@ -1043,6 +1114,83 @@ int main() {
 				case 3: magnet_level = newValue; break;
 			}
 			QueueSave();
+		};
+		
+		// Lobby callbacks
+		g_network->onPlayerJoinReceived = [](const PlayerJoinPacket& packet) {
+			// Host only: add player to lobby
+			if (g_network->IsHost()) {
+				LobbyPlayer p;
+				p.name = packet.name;
+				p.ready = false;
+				p.isHost = false;
+				lobby_players.push_back(p);
+				
+				// Send updated player list to all
+				PlayerListPacket listPkt;
+				listPkt.count = (uint8_t)lobby_players.size();
+				for (size_t i = 0; i < lobby_players.size(); ++i) {
+					strncpy(listPkt.players[i].name, lobby_players[i].name.c_str(), 31);
+					listPkt.players[i].name[31] = '\0';
+					listPkt.players[i].ready = lobby_players[i].ready;
+					listPkt.players[i].isHost = lobby_players[i].isHost;
+				}
+				g_network->SendPacket(&listPkt, sizeof(listPkt));
+			}
+		};
+		
+		g_network->onPlayerListReceived = [](const PlayerListPacket& packet) {
+			lobby_players.clear();
+			for (uint8_t i = 0; i < packet.count; ++i) {
+				LobbyPlayer p;
+				p.name = packet.players[i].name;
+				p.ready = packet.players[i].ready;
+				p.isHost = packet.players[i].isHost;
+				lobby_players.push_back(p);
+			}
+			// Update my_lobby_name if not set
+			if (my_lobby_name.empty() && !lobby_players.empty()) {
+				// Find myself (the non-host player if client, or host if host)
+				for (const auto& p : lobby_players) {
+					if (g_network->IsHost() && p.isHost) {
+						my_lobby_name = p.name;
+						break;
+					} else if (!g_network->IsHost() && !p.isHost) {
+						my_lobby_name = p.name;
+						break;
+					}
+				}
+			}
+		};
+		
+		g_network->onReadyStatusReceived = [](const ReadyStatusPacket& packet) {
+			if (g_network->IsHost()) {
+				// Find player by name (we need to know who sent it)
+				// For simplicity, we'll broadcast the updated list
+				// In a real implementation, we'd track by socket/connection
+				// For now, toggle the first non-host player's ready status
+				for (auto& p : lobby_players) {
+					if (!p.isHost) {
+						p.ready = packet.ready;
+						break;
+					}
+				}
+				// Broadcast updated list
+				PlayerListPacket listPkt;
+				listPkt.count = (uint8_t)lobby_players.size();
+				for (size_t i = 0; i < lobby_players.size(); ++i) {
+					strncpy(listPkt.players[i].name, lobby_players[i].name.c_str(), 31);
+					listPkt.players[i].name[31] = '\0';
+					listPkt.players[i].ready = lobby_players[i].ready;
+					listPkt.players[i].isHost = lobby_players[i].isHost;
+				}
+				g_network->SendPacket(&listPkt, sizeof(listPkt));
+			}
+		};
+		
+		g_network->onStartGameReceived = [](const StartGamePacket& packet) {
+			// Client receives start signal
+			ResetRun();
 		};
 	};
 	BindNetworkCallbacks();
@@ -1231,8 +1379,12 @@ int main() {
 			}
 			case GameState::MULTIPLAYER: {
 				if (g_network->IsConnected()) {
-					if (IsKeyPressed(KEY_SPACE)) ResetRun();
 					if (IsKeyPressed(KEY_T)) gameState = GameState::TEAM_SHOP;
+					if (IsKeyPressed(KEY_SPACE)) {
+						gameState = GameState::LOBBY;
+						in_lobby = true;
+						lobby_ready = false;
+					}
 				}
 				if (IsKeyPressed(KEY_C)) {
 					if (g_network == &LanManager::Get()) {
@@ -1249,45 +1401,82 @@ int main() {
 					g_network->HostGame();
 				}
 				{
-				    if (IsKeyPressed(KEY_J)) {
-				        if (!g_join_input_active) {
-				            g_join_input_active = true;
-				            join_account_id_input.clear();
-				        }
-				    }
-				    if (g_join_input_active) {
-				        int ch = GetCharPressed();
-				        while (ch > 0) {
-				            if (ch >= 32 && ch <= 125) {
-				                join_account_id_input += (char)ch;
-				            }
-				            ch = GetCharPressed();
-				        }
-				        if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
-				            join_account_id_input.pop_back();
-				        }
-				        if (IsKeyPressed(KEY_ENTER)) {
-				            if (!join_account_id_input.empty()) {
-				                g_network->JoinGame(join_account_id_input);
-				            }
-				            g_join_input_active = false;
+					if (IsKeyPressed(KEY_J)) {
+						if (!g_join_input_active) {
+							g_join_input_active = true;
 							join_account_id_input.clear();
-				        }
-				        if (IsKeyPressed(KEY_ESCAPE)) {
-				            g_join_input_active = false;
+						}
+					}
+					if (g_join_input_active) {
+						int ch = GetCharPressed();
+						while (ch > 0) {
+							if (ch >= 32 && ch <= 125) {
+								join_account_id_input += (char)ch;
+							}
+							ch = GetCharPressed();
+						}
+						if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
+							join_account_id_input.pop_back();
+						}
+						if (IsKeyPressed(KEY_ENTER)) {
+							if (!join_account_id_input.empty()) {
+								g_network->JoinGame(join_account_id_input);
+							}
+							g_join_input_active = false;
 							join_account_id_input.clear();
-				        }
-				    }
-				    // If not inputting and ESC pressed, return to menu
-				    if (!g_join_input_active && IsKeyPressed(KEY_ESCAPE)) {
-				        gameState = GameState::MENU;
-				    }
-				    login_status = g_network->GetStatus();
-				    my_account_id = g_network->GetMyId();
-				}
-				break;
+						}
+						if (IsKeyPressed(KEY_ESCAPE)) {
+							g_join_input_active = false;
+							join_account_id_input.clear();
+						}
+					}
+					// If not inputting and ESC pressed, return to menu
+					if (!g_join_input_active && IsKeyPressed(KEY_ESCAPE)) {
+						gameState = GameState::MENU;
+					}
+login_status = g_network->GetStatus();
+				my_account_id = g_network->GetMyId();
 			}
-			case GameState::TEAM_SHOP: {
+			break;
+		}
+		case GameState::LOBBY: {
+			if (g_network->IsHost()) {
+				// Host can start game when all ready
+				if (IsKeyPressed(KEY_SPACE)) {
+					bool allReady = true;
+					for (const auto& p : lobby_players) {
+						if (!p.ready) { allReady = false; break; }
+					}
+					if (allReady && lobby_players.size() > 1) {
+						StartGamePacket startPkt;
+						g_network->SendPacket(&startPkt, sizeof(startPkt));
+						ResetRun();
+					}
+				}
+			} else {
+				// Client can toggle ready
+				if (IsKeyPressed(KEY_R)) {
+					lobby_ready = !lobby_ready;
+					ReadyStatusPacket readyPkt;
+					readyPkt.ready = lobby_ready;
+					g_network->SendPacket(&readyPkt, sizeof(readyPkt));
+				}
+			}
+			if (IsKeyPressed(KEY_ESCAPE)) {
+				// Leave lobby
+				in_lobby = false;
+				lobby_players.clear();
+				lobby_ready = false;
+				my_lobby_name = "";
+				// Disconnect from network
+				g_network->Shutdown();
+				g_network->Init();
+				BindNetworkCallbacks();
+				gameState = GameState::MULTIPLAYER;
+			}
+			break;
+		}
+		case GameState::TEAM_SHOP: {
 				auto buyTeam = [](uint8_t id, int cost, int32_t& stat, int delta) {
 					if (team_coins >= cost) {
 						team_coins -= cost;
@@ -1518,7 +1707,7 @@ int main() {
 			for (auto& p : dash_trail) {
 				float alpha = 20 + p.life * 8;
 				DrawRectangleRounded({p.rect.x - 15, p.rect.y - 15, p.rect.width + 30, p.rect.height + 30},
-				                     0.3f, 16, Fade(Color{120,210,255,255}, alpha / 255.0f));
+									 0.3f, 16, Fade(Color{120,210,255,255}, alpha / 255.0f));
 			}
 
 			// draw world
@@ -1569,6 +1758,8 @@ int main() {
 			DrawInfoHub();
 		} else if (gameState == GameState::MULTIPLAYER) {
 			DrawMultiplayerMenu();
+		} else if (gameState == GameState::LOBBY) {
+			DrawLobbyMenu();
 		} else if (gameState == GameState::TEAM_SHOP) {
 			DrawTeamShop();
 		}
