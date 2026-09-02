@@ -77,7 +77,8 @@ static float shield_cooldown_real = 300;
 static float shield_time_real     = 120;
 static int   magnet_level        = 0;
 static bool  save_dirty          = false;
-static double last_save_tick     = 0;
+static double last_save_tick = 0;
+static bool g_join_input_active = false;
 
 static void SaveGame() {
 	std::ofstream f(SAVE_FILE, std::ios::trunc);
@@ -741,8 +742,16 @@ static void DrawMultiplayerMenu() {
 	// JOIN field with blinking cursor
 	bool isClient   = !g_network->IsHost() && g_network->IsConnected();
 	Color joinColor = isClient ? C_GREEN : Color{180,180,80,255};
-	int blinkOn     = (((int)(GetTime() * 1000)) / 500) % 2;
-	std::string joinLabel = "[ J ] JOIN: " + join_account_id_input + (blinkOn ? "|" : " ");
+	int blinkOn = 0;
+	if (g_join_input_active) {
+		blinkOn = (((int)(GetTime() * 1000)) / 500) % 2;
+	}
+	std::string joinLabel;
+	if (g_join_input_active) {
+		joinLabel = "[ Enter ] JOIN: " + join_account_id_input + (blinkOn ? "|" : " ");
+	} else {
+		joinLabel = "[ J ] JOIN: " + join_account_id_input;
+	}
 	DrawTextCentered(joinLabel.c_str(), y, joinColor, 20); y += gap;
 
 	// Divider
@@ -1240,23 +1249,42 @@ int main() {
 					g_network->HostGame();
 				}
 				{
-					int ch = GetCharPressed();
-					while (ch > 0) {
-						if (ch >= 32 && ch <= 125) {
-							join_account_id_input += (char)ch;
-						}
-						ch = GetCharPressed();
-					}
-					if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
-						join_account_id_input.pop_back();
-					}
-					if (IsKeyPressed(KEY_J)) {
-						g_network->JoinGame(join_account_id_input);
-					}
+				    if (IsKeyPressed(KEY_J)) {
+				        if (!g_join_input_active) {
+				            g_join_input_active = true;
+				            join_account_id_input.clear();
+				        }
+				    }
+				    if (g_join_input_active) {
+				        int ch = GetCharPressed();
+				        while (ch > 0) {
+				            if (ch >= 32 && ch <= 125) {
+				                join_account_id_input += (char)ch;
+				            }
+				            ch = GetCharPressed();
+				        }
+				        if (IsKeyPressed(KEY_BACKSPACE) && !join_account_id_input.empty()) {
+				            join_account_id_input.pop_back();
+				        }
+				        if (IsKeyPressed(KEY_ENTER)) {
+				            if (!join_account_id_input.empty()) {
+				                g_network->JoinGame(join_account_id_input);
+				            }
+				            g_join_input_active = false;
+							join_account_id_input.clear();
+				        }
+				        if (IsKeyPressed(KEY_ESCAPE)) {
+				            g_join_input_active = false;
+							join_account_id_input.clear();
+				        }
+				    }
+				    // If not inputting and ESC pressed, return to menu
+				    if (!g_join_input_active && IsKeyPressed(KEY_ESCAPE)) {
+				        gameState = GameState::MENU;
+				    }
+				    login_status = g_network->GetStatus();
+				    my_account_id = g_network->GetMyId();
 				}
-				login_status = g_network->GetStatus();
-				my_account_id = g_network->GetMyId();
-				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MENU;
 				break;
 			}
 			case GameState::TEAM_SHOP: {
