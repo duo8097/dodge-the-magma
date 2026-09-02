@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <netdb.h>
 
 #ifdef _WIN32
     #include <winsock2.h>
