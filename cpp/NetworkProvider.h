@@ -22,7 +22,7 @@ struct PlayerStatePacket {
     uint8_t  type      = 1;
     uint8_t  protocolVersion = 1;
     uint32_t playerId;
-    uint16_t sequenceId; // Added for ordering
+    uint32_t sequenceId; // Added for ordering (was uint16_t, now uint32_t to prevent wrap)
     float    x;
     float    y;
     float    vx;

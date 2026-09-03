@@ -39,7 +39,9 @@ static const float COIN_FALL_SPEED     = 5.0f;
 static const char* SAVE_FILE           = "save.txt";
 static const int   AUTO_SAVE_INTERVAL  = 5000; // ms
 static uint32_t g_session_id = 0;
-static uint16_t seq_id = 0;
+static uint32_t seq_id = 0;
+static std::map<uint32_t, uint32_t> lastSequence;
+static uint32_t lastTransactionId = 0;
 
 // mutable settings (loaded from save)
 static int   TARGET_FPS  = DEFAULT_TARGET_FPS;
@@ -1089,10 +1091,7 @@ int main() {
 	g_network->Init();
 
 	auto BindNetworkCallbacks = []() {
-		// Track last sequence per player to reject stale packets
-		std::map<uint32_t, uint16_t> lastSequence;
-		
-		g_network->onPlayerStateReceived = [&lastSequence](const PlayerStatePacket& packet) {
+		g_network->onPlayerStateReceived = [](const PlayerStatePacket& packet) {
 			auto it = lastSequence.find(packet.playerId);
 			if (it != lastSequence.end() && packet.sequenceId <= it->second) {
 				// Stale packet (older or same sequence), ignore
@@ -1141,7 +1140,6 @@ int main() {
 			team_coins = newTeamCoins;
 		};
 		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t transactionId) {
-			static uint32_t lastTransactionId = 0;
 			// Ignore duplicate/old transactions
 			if (transactionId <= lastTransactionId) return;
 			lastTransactionId = transactionId;
@@ -1227,13 +1225,19 @@ int main() {
 		};
 		
 		g_network->onStartGameReceived = [&expectedSessionId](const StartGamePacket& packet) {
-			// Only validate sessionId if we have an expected value (not first game)
-			if (expectedSessionId != 0 && packet.sessionId != expectedSessionId) {
-				// Ignore start game from old session
+			// Always accept the first StartGamePacket (handles reconnect/lobby reset case)
+			// Then validate subsequent packets against sessionId
+			if (expectedSessionId == 0) {
+				// First game session - accept and set the expected session
+				expectedSessionId = packet.sessionId;
+				ResetRun();
+			} else if (packet.sessionId == expectedSessionId) {
+				// Same session - accept
+				ResetRun();
+			} else {
+				// Different session - ignore (old packet or from different game)
 				return;
 			}
-			expectedSessionId = packet.sessionId;
-			ResetRun();
 		};
 	};
 	BindNetworkCallbacks();
@@ -1513,9 +1517,8 @@ login_status = g_network->GetStatus();
 				lobby_players.clear();
 				lobby_ready = false;
 				my_lobby_name = "";
-				// Reset multiplayer state for clean reconnect
-				expectedSessionId = 0;
 				team_upgrade_tx_id = 0;
+				lastTransactionId = 0;
 				// Disconnect from network
 				g_network->Shutdown();
 				g_network->Init();
@@ -1730,13 +1733,14 @@ case GameState::TEAM_SHOP: {
 				}
 if (collected) { 
     if (is_multiplayer) {
+        int32_t newTeamCoins = team_coins + collected;
         if (g_network->onCoinPickupReceived) {
-            g_network->onCoinPickupReceived(collected, team_coins + collected);
+            g_network->onCoinPickupReceived(collected, newTeamCoins);
         }
         CoinPickupPacket pkt;
         pkt.type = 3;
         pkt.count = collected;
-        pkt.team_coins = team_coins + collected;
+        pkt.team_coins = newTeamCoins;
         g_network->SendPacket(&pkt, sizeof(pkt));
     } else {
         coins += collected; 
