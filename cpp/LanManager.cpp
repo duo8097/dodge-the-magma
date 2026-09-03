@@ -82,7 +82,10 @@ void LanManager::Tick() {
                 strncpy(joinPkt.name, m_myPlayerName.c_str(), 31);
                 joinPkt.name[31] = '\0';
                 
-                sendto(sock, (const char*)&joinPkt, sizeof(joinPkt), 0, (struct sockaddr*)&m_hostAddress, sizeof(m_hostAddress));
+                ssize_t sent = sendto(sock, (const char*)&joinPkt, sizeof(joinPkt), 0, (struct sockaddr*)&m_hostAddress, sizeof(m_hostAddress));
+                if (sent < 0) {
+                    std::cout << "Warning: sendto failed on join packet" << std::endl;
+                }
             }
         }
     }
@@ -234,13 +237,19 @@ void LanManager::SendPacket(const void* data, uint32_t length) {
         for (const auto& peer : m_players) {
             if (peer.isHost) continue; // don't send to ourselves
             if (peer.addressValid) {
-                sendto(sock, (const char*)data, length, 0, (struct sockaddr*)&peer.address, sizeof(peer.address));
+                ssize_t sent = sendto(sock, (const char*)data, length, 0, (struct sockaddr*)&peer.address, sizeof(peer.address));
+                if (sent < 0) {
+                    std::cout << "Warning: sendto failed to peer" << std::endl;
+                }
             }
         }
     } else {
         socket_t sock = (socket_t)m_clientSocket;
         if (sock == INVALID_SOCKET_VAL) return;
-        sendto(sock, (const char*)data, length, 0, (struct sockaddr*)&m_hostAddress, sizeof(m_hostAddress));
+        ssize_t sent = sendto(sock, (const char*)data, length, 0, (struct sockaddr*)&m_hostAddress, sizeof(m_hostAddress));
+        if (sent < 0) {
+            std::cout << "Warning: sendto failed to host" << std::endl;
+        }
     }
 }
 
@@ -319,11 +328,16 @@ void LanManager::ReceiveData() {
         m_players[idx].lastSeen = now; // Update last seen time for the known player
         
         if (type == 1 && onPlayerStateReceived && r == sizeof(PlayerStatePacket)) {
-
-                    onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer));
+                    auto& pkt = *reinterpret_cast<PlayerStatePacket*>(buffer);
+                    // Validate playerId matches the sender's registered player
+                    if (pkt.playerId != m_players[idx].playerId) {
+                        // PlayerId mismatch - potential spoofing, ignore packet
+                        continue;
+                    }
+                    onPlayerStateReceived(pkt);
                 } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
                     auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
-                    onCoinPickupReceived(pkt.count);
+                    onCoinPickupReceived(pkt.count, pkt.team_coins);
                 } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
@@ -347,7 +361,10 @@ void LanManager::ReceiveData() {
             // Forward/relay to all other peers
             for (const auto& other : m_players) {
                 if (other.isHost || (other.addressValid && AddrEqual(other.address, senderAddr))) continue;
-                sendto((socket_t)m_serverSocket, buffer, r, 0, (struct sockaddr*)&other.address, sizeof(other.address));
+                ssize_t sent = sendto((socket_t)m_serverSocket, buffer, r, 0, (struct sockaddr*)&other.address, sizeof(other.address));
+                if (sent < 0) {
+                    std::cout << "Warning: sendto failed forwarding packet" << std::endl;
+                }
             }
 
             }

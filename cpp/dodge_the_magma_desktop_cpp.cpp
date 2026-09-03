@@ -39,9 +39,11 @@ static const float COIN_FALL_SPEED     = 5.0f;
 static const char* SAVE_FILE           = "save.txt";
 static const int   AUTO_SAVE_INTERVAL  = 5000; // ms
 static uint32_t g_session_id = 0;
+static uint16_t seq_id = 0;
 
 // mutable settings (loaded from save)
 static int   TARGET_FPS  = DEFAULT_TARGET_FPS;
+static uint32_t expectedSessionId = 0;
 
 // ---------- COLORS ----------
 static const Color C_WHITE   = {255,255,255,255};
@@ -1087,12 +1089,32 @@ int main() {
 	g_network->Init();
 
 	auto BindNetworkCallbacks = []() {
-		g_network->onPlayerStateReceived = [](const PlayerStatePacket& packet) {
-			int idx = (int)packet.playerId % 4;
-			remote_player_x[idx] = packet.x;
-			remote_player_y[idx] = packet.y;
-			remote_has_shield[idx] = packet.has_shield;
-			remote_score[idx] = packet.score;
+		// Track last sequence per player to reject stale packets
+		std::map<uint32_t, uint16_t> lastSequence;
+		
+		g_network->onPlayerStateReceived = [&lastSequence](const PlayerStatePacket& packet) {
+			auto it = lastSequence.find(packet.playerId);
+			if (it != lastSequence.end() && packet.sequenceId <= it->second) {
+				// Stale packet (older or same sequence), ignore
+				return;
+			}
+			lastSequence[packet.playerId] = packet.sequenceId;
+			
+			int idx = -1;
+			if (g_network) {
+				for (int i = 0; i < (int)g_network->m_players.size() && i < 4; ++i) {
+					if (g_network->m_players[i].playerId == packet.playerId) {
+						idx = i;
+						break;
+					}
+				}
+			}
+			if (idx >= 0 && idx < 4) {
+				remote_player_x[idx] = packet.x;
+				remote_player_y[idx] = packet.y;
+				remote_has_shield[idx] = packet.has_shield;
+				remote_score[idx] = packet.score;
+			}
 		};
 		
 		g_network->onMagmaSpawnReceived = [](const SpawnMagmaPacket& packet) {
@@ -1115,10 +1137,15 @@ int main() {
 			}
 		};
 
-		g_network->onCoinPickupReceived = [](int count) {
-			team_coins += count;
+		g_network->onCoinPickupReceived = [](int count, int32_t newTeamCoins) {
+			team_coins = newTeamCoins;
 		};
 		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t transactionId) {
+			static uint32_t lastTransactionId = 0;
+			// Ignore duplicate/old transactions
+			if (transactionId <= lastTransactionId) return;
+			lastTransactionId = transactionId;
+			
 			switch (upgradeId) {
 				case 0: player_speed = newValue; break;
 				case 1: jump_strength = newValue; break;
@@ -1199,8 +1226,13 @@ int main() {
 			}
 		};
 		
-		g_network->onStartGameReceived = [](const StartGamePacket& packet) {
-			// Client receives start signal
+		g_network->onStartGameReceived = [&expectedSessionId](const StartGamePacket& packet) {
+			// Only validate sessionId if we have an expected value (not first game)
+			if (expectedSessionId != 0 && packet.sessionId != expectedSessionId) {
+				// Ignore start game from old session
+				return;
+			}
+			expectedSessionId = packet.sessionId;
 			ResetRun();
 		};
 	};
@@ -1481,6 +1513,9 @@ login_status = g_network->GetStatus();
 				lobby_players.clear();
 				lobby_ready = false;
 				my_lobby_name = "";
+				// Reset multiplayer state for clean reconnect
+				expectedSessionId = 0;
+				team_upgrade_tx_id = 0;
 				// Disconnect from network
 				g_network->Shutdown();
 				g_network->Init();
@@ -1623,9 +1658,11 @@ case GameState::TEAM_SHOP: {
 				next_coin_spawn = tick + RandInt(850, 1350);
 			}
 
-			// Send player state if multiplayer
+// Send player state if multiplayer
 			if (is_multiplayer) {
 				PlayerStatePacket packet;
+				packet.protocolVersion = 1;
+				packet.sequenceId = seq_id++;
 				packet.x = player.x;
 				packet.y = player.y;
 				packet.vx = player_vx;
@@ -1694,12 +1731,13 @@ case GameState::TEAM_SHOP: {
 if (collected) { 
     if (is_multiplayer) {
         if (g_network->onCoinPickupReceived) {
-            g_network->onCoinPickupReceived(collected);
-            CoinPickupPacket pkt;
-            pkt.type = 3;
-            pkt.count = collected;
-            g_network->SendPacket(&pkt, sizeof(pkt));
+            g_network->onCoinPickupReceived(collected, team_coins + collected);
         }
+        CoinPickupPacket pkt;
+        pkt.type = 3;
+        pkt.count = collected;
+        pkt.team_coins = team_coins + collected;
+        g_network->SendPacket(&pkt, sizeof(pkt));
     } else {
         coins += collected; 
         QueueSave(); 

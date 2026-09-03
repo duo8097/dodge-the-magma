@@ -20,6 +20,7 @@
 
 struct PlayerStatePacket {
     uint8_t  type      = 1;
+    uint8_t  protocolVersion = 1;
     uint32_t playerId;
     uint16_t sequenceId; // Added for ordering
     float    x;
@@ -41,12 +42,15 @@ struct SpawnMagmaPacket {
 
 
 struct CoinPickupPacket {
-    uint8_t  type  = 3;
+    uint8_t  type      = 3;
+    uint8_t  protocolVersion = 1;
     int32_t  count;          // number of coins just collected by sender
+    int32_t  team_coins;     // total team coins after this pickup (authoritative)
 };
 
 struct TeamUpgradePacket {
     uint8_t  type       = 4;
+    uint8_t  protocolVersion = 1;
     uint8_t  upgrade_id; // 0=speed  1=jump  2=shield  3=magnet
     int32_t  new_value;  // stat value after upgrade (applied on receiver side)
     uint32_t transaction_id; // Transaction ID for idempotent purchases
@@ -79,6 +83,7 @@ struct ReadyStatusPacket {
 
 struct StartGamePacket {
     uint8_t type      = 8;
+    uint8_t  protocolVersion = 1;
     uint32_t sessionId; // Session/game ID for ordering and correlation
 };
 
@@ -109,7 +114,7 @@ public:
     std::function<void(const PlayerStatePacket&)>    onPlayerStateReceived;
     std::function<void(const SpawnMagmaPacket&)>     onMagmaSpawnReceived;
     std::function<void(bool)>                        onConnectionEstablished;
-    std::function<void(int /*count*/)>               onCoinPickupReceived;    // team coin sync
+    std::function<void(int /*count*/, int32_t /*teamCoins*/)>               onCoinPickupReceived;    // team coin sync
     std::function<void(uint8_t /*id*/, int32_t, uint32_t)>     onTeamUpgradeReceived;  // team shop sync
     std::function<void(const PlayerJoinPacket&)>     onPlayerJoinReceived;
     std::function<void(const PlayerListPacket&)>     onPlayerListReceived;

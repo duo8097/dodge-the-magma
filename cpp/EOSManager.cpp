@@ -283,7 +283,7 @@ void EOSManager::ReceivePackets() {
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer.data()));
             } else if (type == 3 && onCoinPickupReceived && outBytes == sizeof(CoinPickupPacket)) {
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer.data());
-                onCoinPickupReceived(pkt.count);
+                onCoinPickupReceived(pkt.count, pkt.team_coins);
             } else if (type == 4 && onTeamUpgradeReceived && outBytes == sizeof(TeamUpgradePacket)) {
                 auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer.data());
                 onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
