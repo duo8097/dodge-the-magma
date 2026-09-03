@@ -286,7 +286,7 @@ void EOSManager::ReceivePackets() {
                 onCoinPickupReceived(pkt.count);
             } else if (type == 4 && onTeamUpgradeReceived && outBytes == sizeof(TeamUpgradePacket)) {
                 auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer.data());
-                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
+                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
             } else if (type == 5 && onPlayerJoinReceived && outBytes == sizeof(PlayerJoinPacket)) {
                 onPlayerJoinReceived(*reinterpret_cast<PlayerJoinPacket*>(buffer.data()));
             } else if (type == 6 && onPlayerListReceived && outBytes == sizeof(PlayerListPacket)) {

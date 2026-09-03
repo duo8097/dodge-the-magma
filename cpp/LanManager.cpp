@@ -268,10 +268,6 @@ void LanManager::ReceiveData() {
                 
                 int idx = FindPlayerById(joinPkt->playerId);
                 if (idx == -1) {
-                // If player already exists, update their info and last seen.
-                // If new and within limit, add them.
-                int idx = FindPlayerById(joinPkt->playerId);
-                if (idx == -1) {
                     if (m_players.size() < 4) {
                         AddPlayer(joinPkt->playerId, joinPkt->name, false, true, &senderAddr);
                         std::cout << "Player joined: " << joinPkt->name << " ID: " << joinPkt->playerId << std::endl;
@@ -294,7 +290,8 @@ void LanManager::ReceiveData() {
                 joinPktForCallback.playerId = joinPkt->playerId;
                 strncpy(joinPktForCallback.name, joinPkt->name, 31);
                 joinPktForCallback.name[31] = '\0';
-                joinPktForCallback.isHost = m_players[idx].isHost; // Assuming idx is correctly found or set for the new player
+                int callbackIdx = FindPlayerById(joinPkt->playerId);
+                joinPktForCallback.isHost = callbackIdx != -1 ? m_players[callbackIdx].isHost : false;
                 if (onPlayerJoinReceived) {
                     onPlayerJoinReceived(joinPktForCallback);
                 }
@@ -329,7 +326,7 @@ void LanManager::ReceiveData() {
                     onCoinPickupReceived(pkt.count);
                 } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
-                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
+                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
             } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
                 auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
                 // Find player by ID, not name
@@ -368,8 +365,8 @@ void LanManager::ReceiveData() {
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
                 onCoinPickupReceived(pkt.count);
             } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
-                auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
-                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
+                    auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
+                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
             } else if (type == 6 && onPlayerListReceived && r == sizeof(PlayerListPacket)) {
                 auto& pkt = *reinterpret_cast<PlayerListPacket*>(buffer);
                 if (pkt.count <= 4) {

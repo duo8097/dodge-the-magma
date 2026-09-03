@@ -38,6 +38,7 @@ static const float MAGMA_SCORE_SCALE   = 0.06f;
 static const float COIN_FALL_SPEED     = 5.0f;
 static const char* SAVE_FILE           = "save.txt";
 static const int   AUTO_SAVE_INTERVAL  = 5000; // ms
+static uint32_t g_session_id = 0;
 
 // mutable settings (loaded from save)
 static int   TARGET_FPS  = DEFAULT_TARGET_FPS;
@@ -389,7 +390,8 @@ static std::string settings_custom_w = "1280";
 static std::string settings_custom_h = "720";
 static int   settings_active_field = 0;
 static bool  settings_fullscreen = false;
-static int   settings_fps = 60;
+static int settings_fps = 60;
+static uint32_t team_upgrade_tx_id = 0;
 static bool  g_fullscreen = false;
 
 static double NowMs() { return GetTime() * 1000.0; }
@@ -1116,11 +1118,11 @@ int main() {
 		g_network->onCoinPickupReceived = [](int count) {
 			team_coins += count;
 		};
-		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue) {
+		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t transactionId) {
 			switch (upgradeId) {
 				case 0: player_speed = newValue; break;
 				case 1: jump_strength = newValue; break;
-				case 2: shield_cooldown_real = newValue; shield_time_real += 10; break;
+				case 2: shield_cooldown_real = newValue; break;
 				case 3: magnet_level = newValue; break;
 			}
 			QueueSave();
@@ -1458,6 +1460,7 @@ login_status = g_network->GetStatus();
 					}
 					if (allReady && lobby_players.size() > 1) {
 						StartGamePacket startPkt;
+						startPkt.sessionId = ++g_session_id;
 						g_network->SendPacket(&startPkt, sizeof(startPkt));
 						ResetRun();
 					}
@@ -1486,36 +1489,37 @@ login_status = g_network->GetStatus();
 			}
 			break;
 		}
-		case GameState::TEAM_SHOP: {
-				auto buyTeam = [](uint8_t id, int cost, int32_t& stat, int delta) {
-					if (team_coins >= cost) {
-						team_coins -= cost;
-						stat += delta;
-						QueueSave();
-						TeamUpgradePacket pkt;
-						pkt.type = 4;
-						pkt.upgrade_id = id;
-						pkt.new_value = stat;
-						g_network->SendPacket(&pkt, sizeof(pkt));
-					}
-				};
-				if (IsKeyPressed(KEY_ONE)   && team_coins >= 20) { buyTeam(0, 20, player_speed, 1); }
-				if (IsKeyPressed(KEY_TWO)   && team_coins >= 30) { buyTeam(1, 30, jump_strength, -2); }
-				if (IsKeyPressed(KEY_THREE) && team_coins >= 100) {
-					team_coins -= 100;
-					shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
-					shield_time_real += 10;
+case GameState::TEAM_SHOP: {
+			auto buyTeam = [](uint8_t id, int cost, int32_t& stat, int delta) {
+				if (team_coins >= cost) {
+					team_coins -= cost;
+					stat += delta;
 					QueueSave();
 					TeamUpgradePacket pkt;
 					pkt.type = 4;
-					pkt.upgrade_id = 2;
-					pkt.new_value = (int32_t)shield_cooldown_real;
+					pkt.upgrade_id = id;
+					pkt.new_value = stat;
+					pkt.transaction_id = ++team_upgrade_tx_id;
 					g_network->SendPacket(&pkt, sizeof(pkt));
 				}
-				if (IsKeyPressed(KEY_FOUR)  && team_coins >= 150) { buyTeam(3, 150, magnet_level, 1); }
-				if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MULTIPLAYER;
-				break;
+			};
+			if (IsKeyPressed(KEY_ONE)   && team_coins >= 20) { buyTeam(0, 20, player_speed, 1); }
+			if (IsKeyPressed(KEY_TWO)   && team_coins >= 30) { buyTeam(1, 30, jump_strength, -2); }
+			if (IsKeyPressed(KEY_THREE) && team_coins >= 100) {
+				team_coins -= 100;
+				shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
+				QueueSave();
+				TeamUpgradePacket pkt;
+				pkt.type = 4;
+				pkt.upgrade_id = 2;
+				pkt.new_value = (int32_t)shield_cooldown_real;
+				pkt.transaction_id = ++team_upgrade_tx_id;
+				g_network->SendPacket(&pkt, sizeof(pkt));
 			}
+			if (IsKeyPressed(KEY_FOUR)  && team_coins >= 150) { buyTeam(3, 150, magnet_level, 1); }
+			if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MULTIPLAYER;
+			break;
+		}
 			}
 			if (gameState == GameState::GAME && IsKeyReleased(KEY_SPACE)) jump_hold_time = 0;
 		}
