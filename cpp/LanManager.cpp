@@ -468,26 +468,9 @@ void LanManager::SendPlayerList() {
 }
 
 std::string LanManager::GetMyId() const {
-    char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) != 0) return "127.0.0.1";
-    struct addrinfo hints = {}, *res = nullptr;
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(hostname, nullptr, &hints, &res) == 0 && res) {
-        char ip[INET_ADDRSTRLEN] = {};
-        // Safely walk the addrinfo list to find a valid IPv4 result
-        for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
-            if (p->ai_family == AF_INET && p->ai_addr != nullptr) {
-                sockaddr_in* sa = reinterpret_cast<sockaddr_in*>(p->ai_addr);
-                if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) != nullptr) {
-                    freeaddrinfo(res);
-                    return std::string(ip);
-                }
-            }
-        }
-        freeaddrinfo(res);
-    }
-    return "127.0.0.1";
+    // For LAN, return the playerId (avoids fragile getaddrinfo/inet_ntop chain
+    // that previously crashed with SIGSEGV due to invalid ai_addr/sa->sin_addr).
+    return std::to_string(m_myPlayerId);
 }
 
 uint32_t LanManager::GetPlayerId() const {
