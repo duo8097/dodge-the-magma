@@ -8,6 +8,7 @@
 #include "raylib.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -85,6 +86,9 @@ static int   magnet_level        = 0;
 static bool  save_dirty          = false;
 static double last_save_tick = 0;
 static bool g_join_input_active = false;
+static std::string login_status = "Not Logged In";
+static std::string my_account_id = "";
+static std::string join_account_id_input = "";
 
 static void SaveGame() {
 	std::ofstream f(SAVE_FILE, std::ios::trunc);
@@ -122,16 +126,6 @@ static void LoadGame() {
 			else if (key == "target_fps") TARGET_FPS = std::stoi(val);
 		} catch (...) {}
 	}
-}
-
-static void GText(const char* text, float x, float y, int fontSize, Color color) {
-	float spacing = fontSize * 0.04f;
-	DrawTextEx(g_font, text, {x, y}, (float)fontSize, spacing, color);
-}
-
-static int GMeasure(const char* text, int fontSize) {
-	float spacing = fontSize * 0.04f;
-	return (int)MeasureTextEx(g_font, text, (float)fontSize, spacing).x;
 }
 
 static void DrawBox(float x, float y, float w, float h, Color fill = BLACK, Color border = C_WHITE, float radius = 0.18f) {
@@ -335,13 +329,10 @@ static float remote_player_x[4] = {-1000, -1000, -1000, -1000};
 static float remote_player_y[4] = {-1000, -1000, -1000, -1000};
 static bool remote_has_shield[4] = {false, false, false, false};
 static int remote_score[4] = {0, 0, 0, 0};
-static std::string login_status = "Not Logged In";
-static std::string my_account_id = "";
-static std::string join_account_id_input = "";
 
 // ---------- TEAM / MULTIPLAYER STATE ----------
 static int team_coins   = 0;  // shared coin pool between both players (multiplayer only)
-static int remote_score = 0;  // peer's score received each frame via PlayerStatePacket
+// (remote_score is the [4] array declared above; peer's scores indexed by player slot)
 
 // ---------- LOBBY STATE ----------
 struct LobbyPlayer {
@@ -399,6 +390,13 @@ static uint32_t team_upgrade_tx_id = 0;
 static bool  g_fullscreen = false;
 
 static double NowMs() { return GetTime() * 1000.0; }
+static float clampf(float value, float minValue, float maxValue) {
+    return std::max(minValue, std::min(value, maxValue));
+}
+// Helper for raylib 6.0 compatibility (was a built-in in older raylib)
+static float UpdateTimer(float timer, float dt) {
+    return std::max(0.0f, timer - dt);
+}
 static int RandInt(int lo, int hi) { return GetRandomValue(lo, hi); }
 
 static void ResetRun() {
@@ -426,10 +424,10 @@ static void ResetRun() {
 	magma_list.clear();
 	coin_list.clear();
 	facing = 1;
-	remote_player_x = -1000;
-	remote_player_y = -1000;
-	remote_has_shield = false;
-	remote_score = 0;
+	std::fill(std::begin(remote_player_x), std::end(remote_player_x), -1000.0f);
+	std::fill(std::begin(remote_player_y), std::end(remote_player_y), -1000.0f);
+	std::fill(std::begin(remote_has_shield), std::end(remote_has_shield), false);
+	std::fill(std::begin(remote_score), std::end(remote_score), 0);
 	if (is_multiplayer) team_coins = 0;
 	double now = NowMs();
 	next_magma_spawn = now + 300;
@@ -718,7 +716,7 @@ static void DrawInfoHub() {
 	if (is_multiplayer) {
 		GText(TextFormat("TEAM:  %d",  team_coins),   (float)(hubX + 16), (float)(hubY + 38), 20, C_ORANGE);
 		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 64), 18, C_WHITE);
-		GText(TextFormat("P2:    %d",  remote_score),  (float)(hubX + 16), (float)(hubY + 84), 16, Color{210,140,60,255});
+		GText(TextFormat("P2:    %d",  remote_score[0]),  (float)(hubX + 16), (float)(hubY + 84), 16, Color{210,140,60,255});
 	} else {
 		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 40), 20, C_WHITE);
 	}
@@ -1101,8 +1099,10 @@ int main() {
 			
 			int idx = -1;
 			if (g_network) {
-				for (int i = 0; i < (int)g_network->m_players.size() && i < 4; ++i) {
-					if (g_network->m_players[i].playerId == packet.playerId) {
+				int count = g_network->GetPlayerCount();
+				if (count > 4) count = 4;
+				for (int i = 0; i < count; ++i) {
+					if (g_network->GetPlayerIdAt(i) == packet.playerId) {
 						idx = i;
 						break;
 					}
@@ -1224,7 +1224,7 @@ int main() {
 			}
 		};
 		
-		g_network->onStartGameReceived = [&expectedSessionId](const StartGamePacket& packet) {
+		g_network->onStartGameReceived = [](const StartGamePacket& packet) {
 			// Always accept the first StartGamePacket (handles reconnect/lobby reset case)
 			// Then validate subsequent packets against sessionId
 			if (expectedSessionId == 0) {

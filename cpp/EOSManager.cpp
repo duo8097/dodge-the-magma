@@ -74,7 +74,7 @@ void EOSManager::Tick() {
                 
                 PlayerJoinPacket joinPkt;
                 joinPkt.type = 5;
-                joinPkt.playerId = 0; // PPUID is identified by remote userId in EOS
+                joinPkt.playerId = GetPlayerId();
                 std::string myName = "Player_" + std::to_string(rand() % 10000 + 1000);
                 strncpy(joinPkt.name, myName.c_str(), 31);
                 joinPkt.name[31] = '\0';
@@ -306,4 +306,17 @@ std::string EOSManager::GetMyId() const {
     int32_t len = sizeof(buffer);
     EOS_ProductUserId_ToString(m_localPUID, buffer, &len);
     return std::string(buffer);
+}
+
+uint32_t EOSManager::GetPlayerId() const {
+    if (!m_localPUID) return 0;
+    // Hash the PUID to a 32-bit ID for use in packet fields
+    char buffer[256];
+    int32_t len = sizeof(buffer);
+    if (EOS_ProductUserId_ToString(m_localPUID, buffer, &len) != EOS_EResult::EOS_Success) return 0;
+    uint32_t hash = 0;
+    for (int32_t i = 0; i < len; ++i) {
+        hash = hash * 31 + (uint8_t)buffer[i];
+    }
+    return hash;
 }

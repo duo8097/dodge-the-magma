@@ -24,6 +24,9 @@ public:
     
     std::string GetStatus() const override { return m_statusMessage; }
     std::string GetMyId() const override;
+    uint32_t GetPlayerId() const override;
+    int GetPlayerCount() const override { return 0; }  // EOS tracks remote via PUID, not yet exposed
+    uint32_t GetPlayerIdAt(int slot) const override { (void)slot; return 0; }
 
 private:
     EOSManager() = default;

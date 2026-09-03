@@ -32,7 +32,9 @@ public:
     
     std::string GetStatus() const override { return m_statusMessage; }
     std::string GetMyId() const override;
-    uint32_t GetPlayerId() const { return m_myPlayerId; }
+    uint32_t GetPlayerId() const override;
+    int GetPlayerCount() const override;
+    uint32_t GetPlayerIdAt(int slot) const override;
 
 private:
     LanManager() = default;

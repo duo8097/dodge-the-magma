@@ -109,6 +109,11 @@ public:
     virtual bool        IsConnected() const = 0;
     virtual std::string GetStatus()   const = 0;
     virtual std::string GetMyId()     const = 0;
+    virtual uint32_t GetPlayerId() const = 0;
+    // Public accessor: get player count and a playerId by slot (0..N-1).
+    // Returns -1 if slot is out of range or player not present.
+    virtual int GetPlayerCount() const = 0;
+    virtual uint32_t GetPlayerIdAt(int slot) const = 0;
 
     // ── Callbacks ──
     std::function<void(const PlayerStatePacket&)>    onPlayerStateReceived;
@@ -117,6 +122,7 @@ public:
     std::function<void(int /*count*/, int32_t /*teamCoins*/)>               onCoinPickupReceived;    // team coin sync
     std::function<void(uint8_t /*id*/, int32_t, uint32_t)>     onTeamUpgradeReceived;  // team shop sync
     std::function<void(const PlayerJoinPacket&)>     onPlayerJoinReceived;
+    std::function<void(const PlayerJoinPacket&)>     onPlayerRemoved;        // player left lobby
     std::function<void(const PlayerListPacket&)>     onPlayerListReceived;
     std::function<void(const ReadyStatusPacket&)>    onReadyStatusReceived;
     std::function<void(const StartGamePacket&)>      onStartGameReceived;

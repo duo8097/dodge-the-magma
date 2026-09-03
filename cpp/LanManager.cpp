@@ -299,8 +299,7 @@ void LanManager::ReceiveData() {
                 joinPktForCallback.playerId = joinPkt->playerId;
                 strncpy(joinPktForCallback.name, joinPkt->name, 31);
                 joinPktForCallback.name[31] = '\0';
-                int callbackIdx = FindPlayerById(joinPkt->playerId);
-                joinPktForCallback.isHost = callbackIdx != -1 ? m_players[callbackIdx].isHost : false;
+                // isHost is not part of the wire packet; host/client roles are determined by sender address
                 if (onPlayerJoinReceived) {
                     onPlayerJoinReceived(joinPktForCallback);
                 }
@@ -312,8 +311,6 @@ void LanManager::ReceiveData() {
             } else {
                 // Other packets must come from a registered client
                 int idx = -1;
-        // Find player by address to ensure packet is from a known client
-        int idx = -1;
         for (size_t i = 0; i < m_players.size(); ++i) {
             if (!m_players[i].isHost && m_players[i].addressValid && AddrEqual(m_players[i].address, senderAddr)) {
                 idx = (int)i;
@@ -380,7 +377,7 @@ void LanManager::ReceiveData() {
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer));
             } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
-                onCoinPickupReceived(pkt.count);
+                onCoinPickupReceived(pkt.count, pkt.team_coins);
             } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
@@ -430,14 +427,11 @@ void LanManager::RemovePlayer(int index) {
     if (index >= 0 && index < (int)m_players.size()) {
         // --- Bug #4 Fix: Notify about player removal ---
         if (onPlayerRemoved) {
-            // Need to pass player info to the callback
-            // Construct a PlayerJoinPacket-like structure or similar if available
-            // For now, assume we can pass playerId and name
             PlayerJoinPacket removedPlayerData;
             removedPlayerData.playerId = m_players[index].playerId;
             strncpy(removedPlayerData.name, m_players[index].name, 31);
             removedPlayerData.name[31] = '\0';
-            removedPlayerData.isHost = m_players[index].isHost; // This might be misleading if player was not host
+            // isHost is not part of the wire packet
             onPlayerRemoved(removedPlayerData);
         }
         // --- End Bug #4 Fix ---
@@ -481,10 +475,30 @@ std::string LanManager::GetMyId() const {
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(hostname, nullptr, &hints, &res) == 0 && res) {
         char ip[INET_ADDRSTRLEN] = {};
-        sockaddr_in* sa = reinterpret_cast<sockaddr_in*>(res->ai_addr);
-        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+        // Safely walk the addrinfo list to find a valid IPv4 result
+        for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+            if (p->ai_family == AF_INET && p->ai_addr != nullptr) {
+                sockaddr_in* sa = reinterpret_cast<sockaddr_in*>(p->ai_addr);
+                if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) != nullptr) {
+                    freeaddrinfo(res);
+                    return std::string(ip);
+                }
+            }
+        }
         freeaddrinfo(res);
-        return std::string(ip);
     }
     return "127.0.0.1";
+}
+
+uint32_t LanManager::GetPlayerId() const {
+    return m_myPlayerId;
+}
+
+int LanManager::GetPlayerCount() const {
+    return (int)m_players.size();
+}
+
+uint32_t LanManager::GetPlayerIdAt(int slot) const {
+    if (slot < 0 || slot >= (int)m_players.size()) return 0;
+    return m_players[slot].playerId;
 }
