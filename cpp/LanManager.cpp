@@ -22,6 +22,23 @@
 
 #define LAN_PORT 45678
 
+static int g_wsaRefcount = 0;
+static void WSAStartupOnce() {
+#ifdef _WIN32
+    if (g_wsaRefcount++ == 0) {
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+    }
+#endif
+}
+static void WSACleanupOnce() {
+#ifdef _WIN32
+    if (g_wsaRefcount > 0 && --g_wsaRefcount == 0) {
+        WSACleanup();
+    }
+#endif
+}
+
 static void SetNonBlocking(socket_t sock) {
 #ifdef _WIN32
     u_long mode = 1;
@@ -48,19 +65,40 @@ LanManager& LanManager::Get() {
     return instance;
 }
 
+LanManager::LanManager() = default;
+LanManager::~LanManager() {
+    // Best-effort cleanup. Shutdown() also handles WSACleanup on Windows.
+    Shutdown();
+}
+
 bool LanManager::Init() {
-    Shutdown(); // Ensure old sockets are cleaned up if re-initializing
-#ifdef _WIN32
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-#endif
+    // Close any sockets we already own. Don't call WSACleanupOnce here:
+    // we're paired WSAStartupOnce/WSACleanupOnce around the *instance*
+    // lifetime, not around individual Init/Shutdown cycles.
+    if (m_clientSocket != INVALID_SOCKET_VAL) CLOSE_SOCKET((socket_t)m_clientSocket);
+    if (m_serverSocket != INVALID_SOCKET_VAL) CLOSE_SOCKET((socket_t)m_serverSocket);
+    m_clientSocket = INVALID_SOCKET_VAL;
+    m_serverSocket = INVALID_SOCKET_VAL;
+    m_isHost = false;
+    m_isConnected = false;
+    m_isJoining = false;
+    m_players.clear();
+
+    WSAStartupOnce();
     m_serverSocket = INVALID_SOCKET_VAL;
     m_clientSocket = INVALID_SOCKET_VAL;
-    // m_isConnected and m_isHost will be set by HostGame/JoinGame or Shutdown
     m_isHost = false;
 
     m_isJoining = false;
-    m_myPlayerId = (uint32_t)rand() + 1;
+    // Use a per-call entropy mix so two instances initialised within the same
+    // millisecond still get distinct IDs. Previously both used the same
+    // srand(GetTimeMs()) seed and produced colliding IDs in same-process tests.
+    {
+        uint64_t t = GetTimeMs();
+        uint32_t r = (uint32_t)rand();
+        m_myPlayerId = (uint32_t)((t ^ (uint64_t)r ^ ((uintptr_t)this)) & 0x7FFFFFFFu);
+        if (m_myPlayerId == 0) m_myPlayerId = 1;
+    }
     m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
     m_statusMessage = "LAN Initialized";
     return true;
@@ -141,9 +179,7 @@ void LanManager::Shutdown() {
     m_isConnected = false;
     m_isJoining = false;
     m_players.clear();
-#ifdef _WIN32
-    WSACleanup();
-#endif
+    WSACleanupOnce();
 }
 
 void LanManager::HostGame() {
@@ -151,11 +187,12 @@ void LanManager::HostGame() {
     m_isConnected = false;
     m_statusMessage = "Hosting LAN (UDP)...";
     m_players.clear();
-    
+
     srand(static_cast<unsigned int>(GetTimeMs()));
-    m_myPlayerId = (uint32_t)rand() + 1;
-    
-    std::string myName = "Player_" + std::to_string(rand() % 10000 + 1000);
+    m_myPlayerId = (uint32_t)((GetTimeMs() ^ (uint64_t)((uintptr_t)this)) & 0x7FFFFFFFu);
+    if (m_myPlayerId == 0) m_myPlayerId = 1;
+
+    std::string myName = "Player_" + std::to_string(m_myPlayerId);
     AddPlayer(m_myPlayerId, myName.c_str(), true); // Add host as first player
     
     if (m_serverSocket != INVALID_SOCKET_VAL) {
@@ -190,9 +227,10 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_isConnected = false; // Client is not connected until it receives PlayerList
     m_statusMessage = "Joining LAN (UDP)...";
     m_players.clear();
-    
+
     srand(static_cast<unsigned int>(GetTimeMs()));
-    m_myPlayerId = (uint32_t)rand() + 1;
+    m_myPlayerId = (uint32_t)((GetTimeMs() ^ 0x9E3779B9u ^ (uintptr_t)this) & 0x7FFFFFFFu);
+    if (m_myPlayerId == 0) m_myPlayerId = 1;
     
     if (m_clientSocket != INVALID_SOCKET_VAL) {
         CLOSE_SOCKET((socket_t)m_clientSocket);

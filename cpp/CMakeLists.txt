@@ -83,3 +83,36 @@ else()
         $<TARGET_FILE_DIR:dodge_magma>
     )
 endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multiplayer test suite
+#
+# Build:
+#   cd cpp/build && cmake .. -DBUILD_TESTS=ON && cmake --build . --target test_multiplayer
+# Run:
+#   ./bin/test_multiplayer
+#
+# The test binary uses only NetworkProvider.h + LanManager.cpp/.h, and a raw
+# UDP socket on 127.0.0.1:45678 to simulate a peer. No raylib / no EOS creds.
+# ─────────────────────────────────────────────────────────────────────────────
+option(BUILD_TESTS "Build multiplayer test suite" OFF)
+
+if (BUILD_TESTS)
+    add_executable(test_multiplayer
+        tests/test_multiplayer.cpp
+        LanManager.cpp
+    )
+    target_compile_options(test_multiplayer PRIVATE -O0 -g)
+    target_include_directories(test_multiplayer PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../third-party-api/eos-sdk/SDK/Include"
+    )
+    if (WIN32)
+        target_link_libraries(test_multiplayer PRIVATE ws2_32)
+    elseif (UNIX)
+        target_link_libraries(test_multiplayer PRIVATE pthread)
+    endif()
+    set_target_properties(test_multiplayer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+endif()

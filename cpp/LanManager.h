@@ -17,7 +17,17 @@
 
 class LanManager : public NetworkProvider {
 public:
+    // Singleton accessor (kept for backward compat with the game code).
+    // Prefer constructing your own instance for tests / multi-instance use.
     static LanManager& Get();
+
+    // Public constructor so tests and other consumers can own multiple instances.
+    LanManager();
+    ~LanManager() override;
+
+    // Disable copy/move: this class owns sockets and global WSA state.
+    LanManager(const LanManager&) = delete;
+    LanManager& operator=(const LanManager&) = delete;
 
     bool Init() override;
     void Tick() override;
@@ -37,9 +47,6 @@ public:
     uint32_t GetPlayerIdAt(int slot) const override;
 
 private:
-    LanManager() = default;
-    ~LanManager() = default;
-
     bool m_isHost = false;
     bool m_isConnected = false;
     std::string m_statusMessage = "Offline (LAN)";
