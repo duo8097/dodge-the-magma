@@ -16,6 +16,8 @@
 //  8 = StartGamePacket     (host signals all to start game)
 // ─────────────────────────────────────────────────────────────────────────────
 
+#pragma pack(push, 1)
+
 struct PlayerStatePacket {
     uint8_t  type      = 1;
     float    x;
@@ -29,6 +31,7 @@ struct PlayerStatePacket {
 struct SpawnMagmaPacket {
     uint8_t type  = 2;
     float   x;
+    float   y;
     float   w;
     float   h;
     float   speed;
@@ -47,10 +50,12 @@ struct TeamUpgradePacket {
 
 struct PlayerJoinPacket {
     uint8_t  type = 5;
+    uint32_t playerId;
     char     name[32];
 };
 
 struct PlayerInfo {
+    uint32_t playerId;
     char     name[32];
     bool     ready;
     bool     isHost;
@@ -63,14 +68,16 @@ struct PlayerListPacket {
 };
 
 struct ReadyStatusPacket {
-    uint8_t type = 7;
-    bool    ready;
-    char    name[32];
+    uint8_t  type = 7;
+    bool     ready;
+    uint32_t playerId;
 };
 
 struct StartGamePacket {
     uint8_t type = 8;
 };
+
+#pragma pack(pop)
 
 // ─────────────────────────────────────────────────────────────────────────────
 

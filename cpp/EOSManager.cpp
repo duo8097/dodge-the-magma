@@ -1,6 +1,8 @@
 #include "EOSManager.h"
 #include <iostream>
 #include <cstring>
+#include <chrono>
+#include <vector>
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -10,6 +12,11 @@ static const char* EOS_SANDBOX_ID = "00000000000000000000000000000000";
 static const char* EOS_DEPLOYMENT_ID = "00000000000000000000000000000000";
 static const char* EOS_CLIENT_ID = "00000000000000000000000000000000";
 static const char* EOS_CLIENT_SECRET = "00000000000000000000000000000000";
+
+static uint64_t GetTimeMs() {
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
 
 EOSManager& EOSManager::Get() {
     static EOSManager instance;
@@ -34,7 +41,10 @@ bool EOSManager::Init() {
     PlatformOptions.bIsServer = EOS_FALSE;
 
     m_platform = EOS_Platform_Create(&PlatformOptions);
-    if (!m_platform) return false;
+    if (!m_platform) {
+        EOS_Shutdown();
+        return false;
+    }
 
     m_connect = EOS_Platform_GetConnectInterface(m_platform);
     m_p2p = EOS_Platform_GetP2PInterface(m_platform);
@@ -56,6 +66,23 @@ bool EOSManager::Init() {
 void EOSManager::Tick() {
     if (m_platform) {
         EOS_Platform_Tick(m_platform);
+        
+        uint64_t now = GetTimeMs();
+        if (!m_isHost && m_isJoining && m_remotePUID) {
+            if (now - m_lastJoinAttemptTime >= 500) {
+                m_lastJoinAttemptTime = now;
+                
+                PlayerJoinPacket joinPkt;
+                joinPkt.type = 5;
+                joinPkt.playerId = 0; // PPUID is identified by remote userId in EOS
+                std::string myName = "Player_" + std::to_string(rand() % 10000 + 1000);
+                strncpy(joinPkt.name, myName.c_str(), 31);
+                joinPkt.name[31] = '\0';
+                
+                SendPacket(&joinPkt, sizeof(joinPkt));
+            }
+        }
+        
         if (m_isConnected) {
             ReceivePackets();
         }
@@ -63,16 +90,65 @@ void EOSManager::Tick() {
 }
 
 void EOSManager::Shutdown() {
+    if (m_p2p) {
+        if (m_connectionNotificationId != EOS_INVALID_NOTIFICATIONID) {
+            EOS_P2P_RemoveNotifyPeerConnectionRequest(m_p2p, m_connectionNotificationId);
+            m_connectionNotificationId = EOS_INVALID_NOTIFICATIONID;
+        }
+        if (m_connectionEstablishedNotificationId != EOS_INVALID_NOTIFICATIONID) {
+            EOS_P2P_RemoveNotifyPeerConnectionEstablished(m_p2p, m_connectionEstablishedNotificationId);
+            m_connectionEstablishedNotificationId = EOS_INVALID_NOTIFICATIONID;
+        }
+        if (m_connectionClosedNotificationId != EOS_INVALID_NOTIFICATIONID) {
+            EOS_P2P_RemoveNotifyPeerConnectionClosed(m_p2p, m_connectionClosedNotificationId);
+            m_connectionClosedNotificationId = EOS_INVALID_NOTIFICATIONID;
+        }
+    }
     if (m_platform) {
         EOS_Platform_Release(m_platform);
         m_platform = nullptr;
     }
+    m_connect = nullptr;
+    m_p2p = nullptr;
+    m_localPUID = nullptr;
+    m_remotePUID = nullptr;
+    m_isHost = false;
+    m_isConnected = false;
+    m_isJoining = false;
+    m_statusMessage = "Offline";
     EOS_Shutdown();
+}
+
+void EOSManager::LoginSuccess(EOS_ProductUserId localUserId) {
+    m_localPUID = localUserId;
+    m_statusMessage = "Logged In (EOS)";
+    
+    // Listen for connections
+    EOS_P2P_AddNotifyPeerConnectionRequestOptions reqOpts = {0};
+    reqOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONREQUEST_API_LATEST;
+    reqOpts.LocalUserId = m_localPUID;
+    reqOpts.SocketId = &m_socketId;
+    m_connectionNotificationId = EOS_P2P_AddNotifyPeerConnectionRequest(m_p2p, &reqOpts, this, OnIncomingConnectionRequest);
+        
+    EOS_P2P_AddNotifyPeerConnectionEstablishedOptions estOpts = {0};
+    estOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONESTABLISHED_API_LATEST;
+    estOpts.LocalUserId = m_localPUID;
+    estOpts.SocketId = &m_socketId;
+    m_connectionEstablishedNotificationId = EOS_P2P_AddNotifyPeerConnectionEstablished(m_p2p, &estOpts, this, OnConnectionEstablishedCallback);
+    
+    EOS_P2P_AddNotifyPeerConnectionClosedOptions closedOpts = {0};
+    closedOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONCLOSED_API_LATEST;
+    closedOpts.LocalUserId = m_localPUID;
+    closedOpts.SocketId = &m_socketId;
+    m_connectionClosedNotificationId = EOS_P2P_AddNotifyPeerConnectionClosed(m_p2p, &closedOpts, this, OnConnectionClosedCallback);
 }
 
 void EOS_CALL EOSManager::OnCreateDeviceIdCallback(const EOS_Connect_CreateDeviceIdCallbackInfo* Data) {
     EOSManager* manager = static_cast<EOSManager*>(Data->ClientData);
-    // Ignore error if already created
+    if (Data->ResultCode != EOS_EResult::EOS_Success && Data->ResultCode != EOS_EResult::EOS_DuplicateNotAllowed) {
+        manager->m_statusMessage = "Failed to create Device ID";
+        return;
+    }
     
     EOS_Connect_Credentials Credentials = {0};
     Credentials.ApiVersion = EOS_CONNECT_CREDENTIALS_API_LATEST;
@@ -88,28 +164,7 @@ void EOS_CALL EOSManager::OnCreateDeviceIdCallback(const EOS_Connect_CreateDevic
 void EOS_CALL EOSManager::OnLoginCallback(const EOS_Connect_LoginCallbackInfo* Data) {
     EOSManager* manager = static_cast<EOSManager*>(Data->ClientData);
     if (Data->ResultCode == EOS_EResult::EOS_Success) {
-        manager->m_localPUID = Data->LocalUserId;
-        manager->m_statusMessage = "Logged In (EOS)";
-        
-        // Listen for connections
-        EOS_P2P_AddNotifyPeerConnectionRequestOptions reqOpts = {0};
-        reqOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONREQUEST_API_LATEST;
-        reqOpts.LocalUserId = manager->m_localPUID;
-        reqOpts.SocketId = &manager->m_socketId;
-        manager->m_connectionNotificationId = EOS_P2P_AddNotifyPeerConnectionRequest(manager->m_p2p, &reqOpts, manager, OnIncomingConnectionRequest);
-            
-        EOS_P2P_AddNotifyPeerConnectionEstablishedOptions estOpts = {0};
-        estOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONESTABLISHED_API_LATEST;
-        estOpts.LocalUserId = manager->m_localPUID;
-        estOpts.SocketId = &manager->m_socketId;
-        EOS_P2P_AddNotifyPeerConnectionEstablished(manager->m_p2p, &estOpts, manager, OnConnectionEstablishedCallback);
-        
-        EOS_P2P_AddNotifyPeerConnectionClosedOptions closedOpts = {0};
-        closedOpts.ApiVersion = EOS_P2P_ADDNOTIFYPEERCONNECTIONCLOSED_API_LATEST;
-        closedOpts.LocalUserId = manager->m_localPUID;
-        closedOpts.SocketId = &manager->m_socketId;
-        EOS_P2P_AddNotifyPeerConnectionClosed(manager->m_p2p, &closedOpts, manager, OnConnectionClosedCallback);
-        
+        manager->LoginSuccess(Data->LocalUserId);
     } else if (Data->ResultCode == EOS_EResult::EOS_InvalidUser) {
         // Create user
         EOS_Connect_CreateUserOptions CreateUserOpts = {0};
@@ -124,8 +179,7 @@ void EOS_CALL EOSManager::OnLoginCallback(const EOS_Connect_LoginCallbackInfo* D
 void EOS_CALL EOSManager::OnCreateUserCallback(const EOS_Connect_CreateUserCallbackInfo* Data) {
     EOSManager* manager = static_cast<EOSManager*>(Data->ClientData);
     if (Data->ResultCode == EOS_EResult::EOS_Success) {
-        manager->m_localPUID = Data->LocalUserId;
-        manager->m_statusMessage = "Logged In (EOS)";
+        manager->LoginSuccess(Data->LocalUserId);
     } else {
         manager->m_statusMessage = "Failed to create EOS User";
     }
@@ -133,15 +187,21 @@ void EOS_CALL EOSManager::OnCreateUserCallback(const EOS_Connect_CreateUserCallb
 
 void EOSManager::HostGame() {
     m_isHost = true;
-    m_statusMessage = "Hosting... (Waiting for PUID)";
+    m_isConnected = false;
+    m_remotePUID = nullptr;
+    m_statusMessage = "Hosting... (Waiting for Client PUID)";
 }
 
 void EOSManager::JoinGame(const std::string& addressOrId) {
+    if (!m_localPUID) {
+        m_statusMessage = "Not Logged In (EOS)";
+        return;
+    }
     m_isHost = false;
     m_remotePUID = EOS_ProductUserId_FromString(addressOrId.c_str());
     if (m_remotePUID) {
-        uint8_t dummy = 0;
-        SendPacket(&dummy, 1);
+        m_isJoining = true;
+        m_lastJoinAttemptTime = 0;
         m_statusMessage = "Joining...";
     } else {
         m_statusMessage = "Invalid PUID format";
@@ -163,6 +223,7 @@ void EOS_CALL EOSManager::OnIncomingConnectionRequest(const EOS_P2P_OnIncomingCo
 void EOS_CALL EOSManager::OnConnectionEstablishedCallback(const EOS_P2P_OnPeerConnectionEstablishedInfo* Data) {
     EOSManager* manager = static_cast<EOSManager*>(Data->ClientData);
     manager->m_isConnected = true;
+    manager->m_isJoining = false;
     manager->m_statusMessage = "Connected!";
     if (manager->onConnectionEstablished) manager->onConnectionEstablished(true);
 }
@@ -170,6 +231,7 @@ void EOS_CALL EOSManager::OnConnectionEstablishedCallback(const EOS_P2P_OnPeerCo
 void EOS_CALL EOSManager::OnConnectionClosedCallback(const EOS_P2P_OnRemoteConnectionClosedInfo* Data) {
     EOSManager* manager = static_cast<EOSManager*>(Data->ClientData);
     manager->m_isConnected = false;
+    manager->m_isJoining = false;
     manager->m_statusMessage = "Disconnected";
     if (manager->onConnectionEstablished) manager->onConnectionEstablished(false);
 }
@@ -187,7 +249,11 @@ void EOSManager::SendPacket(const void* data, uint32_t length) {
     options.bAllowDelayedDelivery = EOS_FALSE;
     options.Reliability = EOS_EPacketReliability::EOS_PR_ReliableUnordered;
     options.bDisableAutoAcceptConnection = EOS_FALSE;
-    EOS_P2P_SendPacket(m_p2p, &options);
+    
+    EOS_EResult result = EOS_P2P_SendPacket(m_p2p, &options);
+    if (result != EOS_EResult::EOS_Success) {
+        std::cerr << "EOS_P2P_SendPacket failed: " << (int)result << std::endl;
+    }
 }
 
 void EOSManager::ReceivePackets() {
@@ -215,6 +281,20 @@ void EOSManager::ReceivePackets() {
                 onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer.data()));
             } else if (type == 2 && onMagmaSpawnReceived && outBytes == sizeof(SpawnMagmaPacket)) {
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer.data()));
+            } else if (type == 3 && onCoinPickupReceived && outBytes == sizeof(CoinPickupPacket)) {
+                auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer.data());
+                onCoinPickupReceived(pkt.count);
+            } else if (type == 4 && onTeamUpgradeReceived && outBytes == sizeof(TeamUpgradePacket)) {
+                auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer.data());
+                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
+            } else if (type == 5 && onPlayerJoinReceived && outBytes == sizeof(PlayerJoinPacket)) {
+                onPlayerJoinReceived(*reinterpret_cast<PlayerJoinPacket*>(buffer.data()));
+            } else if (type == 6 && onPlayerListReceived && outBytes == sizeof(PlayerListPacket)) {
+                onPlayerListReceived(*reinterpret_cast<PlayerListPacket*>(buffer.data()));
+            } else if (type == 7 && onReadyStatusReceived && outBytes == sizeof(ReadyStatusPacket)) {
+                onReadyStatusReceived(*reinterpret_cast<ReadyStatusPacket*>(buffer.data()));
+            } else if (type == 8 && onStartGameReceived && outBytes == sizeof(StartGamePacket)) {
+                onStartGameReceived(*reinterpret_cast<StartGamePacket*>(buffer.data()));
             }
         }
     }

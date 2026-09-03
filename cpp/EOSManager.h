@@ -41,6 +41,13 @@ private:
     bool m_isConnected = false;
     std::string m_statusMessage = "Offline";
     EOS_NotificationId m_connectionNotificationId = EOS_INVALID_NOTIFICATIONID;
+    EOS_NotificationId m_connectionEstablishedNotificationId = EOS_INVALID_NOTIFICATIONID;
+    EOS_NotificationId m_connectionClosedNotificationId = EOS_INVALID_NOTIFICATIONID;
+
+    bool m_isJoining = false;
+    uint64_t m_lastJoinAttemptTime = 0;
+
+    void LoginSuccess(EOS_ProductUserId localUserId);
 
     // Connect callbacks
     static void EOS_CALL OnCreateDeviceIdCallback(const EOS_Connect_CreateDeviceIdCallbackInfo* Data);

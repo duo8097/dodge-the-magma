@@ -2,6 +2,17 @@
 #define LAN_MANAGER_H
 
 #include "NetworkProvider.h"
+#include <vector>
+#include <string>
+
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #include <sys/socket.h>
+    #include <arpa/inet.h>
+    #include <netinet/in.h>
+#endif
 
 class LanManager : public NetworkProvider {
 public:
@@ -29,23 +40,33 @@ private:
     bool m_isConnected = false;
     std::string m_statusMessage = "Offline (LAN)";
     
-    // Using int as socket handle (socket_t), casted to size_t to avoid OS headers in .h
-    size_t m_serverSocket = 0;
-    size_t m_clientSocket = 0;
+    size_t m_serverSocket = ~static_cast<size_t>(0);
+    size_t m_clientSocket = ~static_cast<size_t>(0);
     
     struct ConnectedPlayer {
-        char name[32];
+        uint32_t playerId = 0;
+        char name[32] = {0};
         bool ready = false;
         bool isHost = false;
+        bool addressValid = false;
+        sockaddr_in address;
+        uint64_t lastSeen = 0;
     };
     std::vector<ConnectedPlayer> m_players;
+    
+    uint32_t m_myPlayerId = 0;
+    bool m_isJoining = false;
+    uint64_t m_lastJoinAttemptTime = 0;
+    uint64_t m_lastPingTime = 0;
+    sockaddr_in m_hostAddress;
     
     void ReceiveData();
     void AcceptClients();
     void SendPlayerList();
-    void AddPlayer(const char* name, bool isHost);
+    void AddPlayer(uint32_t id, const char* name, bool isHost, bool addressValid = false, const sockaddr_in* addr = nullptr);
     void RemovePlayer(int index);
     int FindPlayerByName(const char* name);
+    int FindPlayerById(uint32_t id);
 };
 
 #endif // LAN_MANAGER_H
