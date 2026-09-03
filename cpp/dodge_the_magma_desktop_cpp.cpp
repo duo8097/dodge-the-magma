@@ -119,9 +119,15 @@ static void LoadGame() {
 	}
 }
 
-// ---------- HELPERS ----------
-static float clampf(float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); }
-static float UpdateTimer(float value, float amount) { return std::max(0.0f, value - amount); }
+static void GText(const char* text, float x, float y, int fontSize, Color color) {
+	float spacing = fontSize * 0.04f;
+	DrawTextEx(g_font, text, {x, y}, (float)fontSize, spacing, color);
+}
+
+static int GMeasure(const char* text, int fontSize) {
+	float spacing = fontSize * 0.04f;
+	return (int)MeasureTextEx(g_font, text, (float)fontSize, spacing).x;
+}
 
 static void DrawBox(float x, float y, float w, float h, Color fill = BLACK, Color border = C_WHITE, float radius = 0.18f) {
 	Rectangle r = {x, y, w, h};
@@ -320,9 +326,10 @@ static float jump_buffer_time = 0;
 
 // Remote Player (Multiplayer)
 static bool is_multiplayer = false;
-static float remote_player_x = 0;
-static float remote_player_y = 0;
-static bool remote_has_shield = false;
+static float remote_player_x[4] = {-1000, -1000, -1000, -1000};
+static float remote_player_y[4] = {-1000, -1000, -1000, -1000};
+static bool remote_has_shield[4] = {false, false, false, false};
+static int remote_score[4] = {0, 0, 0, 0};
 static std::string login_status = "Not Logged In";
 static std::string my_account_id = "";
 static std::string join_account_id_input = "";
@@ -334,6 +341,7 @@ static int remote_score = 0;  // peer's score received each frame via PlayerStat
 // ---------- LOBBY STATE ----------
 struct LobbyPlayer {
 	std::string name;
+	uint32_t playerId = 0;
 	bool ready = false;
 	bool isHost = false;
 };
@@ -428,6 +436,7 @@ static void AddMagma(float x, float y, float w, float h) {
 	if (is_multiplayer && g_network->IsHost()) {
 		SpawnMagmaPacket packet;
 		packet.x = x;
+		packet.y = y;
 		packet.w = w;
 		packet.h = h;
 		packet.speed = 0; // Not used yet
@@ -641,7 +650,7 @@ static void DrawHud() {
 	if (is_multiplayer) {
 		DrawBox(10, 10, 370, 132, BLACK, C_ORANGE);
 		GText(TextFormat("SCORE: %d",             score),              22,  18, 24, C_WHITE);
-		GText(TextFormat("P2 SCORE: %d",          remote_score),       22,  46, 22, C_ORANGE);
+		GText(TextFormat("P2 SCORE: %d",          remote_score[0]),       22,  46, 22, C_ORANGE);
 		GText(TextFormat("TEAM COINS: %d",         team_coins),         22,  72, 22, C_YELLOW);
 		GText(TextFormat("SPD: %d",               player_speed),       22, 106, 18, C_BLUE);
 		GText(TextFormat("JUMPS: %d/%d", jumps_left, max_jumps),      175, 106, 18, C_GREEN);
@@ -1077,14 +1086,15 @@ int main() {
 
 	auto BindNetworkCallbacks = []() {
 		g_network->onPlayerStateReceived = [](const PlayerStatePacket& packet) {
-			remote_player_x = packet.x;
-			remote_player_y = packet.y;
-			remote_has_shield = packet.has_shield;
-			remote_score = packet.score;
+			int idx = (int)packet.playerId % 4;
+			remote_player_x[idx] = packet.x;
+			remote_player_y[idx] = packet.y;
+			remote_has_shield[idx] = packet.has_shield;
+			remote_score[idx] = packet.score;
 		};
 		
 		g_network->onMagmaSpawnReceived = [](const SpawnMagmaPacket& packet) {
-			Rectangle m = {packet.x, -packet.h, packet.w, packet.h};
+			Rectangle m = {packet.x, packet.y, packet.w, packet.h};
 			magma_list.push_back(m);
 		};
 
@@ -1110,7 +1120,7 @@ int main() {
 			switch (upgradeId) {
 				case 0: player_speed = newValue; break;
 				case 1: jump_strength = newValue; break;
-				case 2: shield_cooldown_real = newValue; break;
+				case 2: shield_cooldown_real = newValue; shield_time_real += 10; break;
 				case 3: magnet_level = newValue; break;
 			}
 			QueueSave();
@@ -1122,6 +1132,7 @@ int main() {
 			if (g_network->IsHost()) {
 				LobbyPlayer p;
 				p.name = packet.name;
+				p.playerId = packet.playerId;
 				p.ready = false;
 				p.isHost = false;
 				lobby_players.push_back(p);
@@ -1144,6 +1155,7 @@ int main() {
 			for (uint8_t i = 0; i < packet.count; ++i) {
 				LobbyPlayer p;
 				p.name = packet.players[i].name;
+				p.playerId = packet.players[i].playerId; // Add playerId
 				p.ready = packet.players[i].ready;
 				p.isHost = packet.players[i].isHost;
 				lobby_players.push_back(p);
@@ -1165,9 +1177,9 @@ int main() {
 		
 		g_network->onReadyStatusReceived = [](const ReadyStatusPacket& packet) {
 			if (g_network->IsHost()) {
-				// Find player by name from packet
+				// Find player by playerId from packet
 				for (auto& p : lobby_players) {
-					if (p.name == packet.name) {
+					if (p.playerId == packet.playerId) {
 						p.ready = packet.ready;
 						break;
 					}
@@ -1451,15 +1463,14 @@ login_status = g_network->GetStatus();
 					}
 				}
 			} else {
-				// Client can toggle ready
-				if (IsKeyPressed(KEY_R)) {
-					lobby_ready = !lobby_ready;
-					ReadyStatusPacket readyPkt;
-					readyPkt.ready = lobby_ready;
-					strncpy(readyPkt.name, my_lobby_name.c_str(), 31);
-					readyPkt.name[31] = '\0';
-					g_network->SendPacket(&readyPkt, sizeof(readyPkt));
-				}
+// Client can toggle ready
+	if (IsKeyPressed(KEY_R)) {
+		lobby_ready = !lobby_ready;
+		ReadyStatusPacket readyPkt;
+		readyPkt.ready = lobby_ready;
+		readyPkt.playerId = g_network->GetPlayerId();
+		g_network->SendPacket(&readyPkt, sizeof(readyPkt));
+	}
 			}
 			if (IsKeyPressed(KEY_ESCAPE)) {
 				// Leave lobby
@@ -1676,21 +1687,20 @@ login_status = g_network->GetStatus();
 					else if (c.y > HEIGHT) continue;
 					else nextCoins.push_back(c);
 				}
-				if (collected) { 
-					if (is_multiplayer) {
-						team_coins += collected;
-						if (g_network->onCoinPickupReceived) {
-							g_network->onCoinPickupReceived(collected);
-							CoinPickupPacket pkt;
-							pkt.type = 3;
-							pkt.count = collected;
-							g_network->SendPacket(&pkt, sizeof(pkt));
-						}
-					} else {
-						coins += collected; 
-						QueueSave(); 
-					}
-				}
+if (collected) { 
+    if (is_multiplayer) {
+        if (g_network->onCoinPickupReceived) {
+            g_network->onCoinPickupReceived(collected);
+            CoinPickupPacket pkt;
+            pkt.type = 3;
+            pkt.count = collected;
+            g_network->SendPacket(&pkt, sizeof(pkt));
+        }
+    } else {
+        coins += collected; 
+        QueueSave(); 
+    }
+}
 				coin_list = nextCoins;
 			}
 
@@ -1714,13 +1724,13 @@ login_status = g_network->GetStatus();
 			for (auto& c : coin_list)  DrawCoin(c, tick);
 			
 			// Draw remote player
-			if (is_multiplayer && remote_player_x != -1000) {
-				Rectangle rp = {remote_player_x, remote_player_y, (float)PLAYER_SIZE, (float)PLAYER_SIZE};
+if (is_multiplayer && remote_player_x[0] != -1000) {
+			Rectangle rp = {remote_player_x[0], remote_player_y[0], (float)PLAYER_SIZE, (float)PLAYER_SIZE};
 				DrawRectangleRounded(rp, 0.2f, 16, Fade(C_ORANGE, 0.7f));
 				DrawRectangleRoundedLines(rp, 0.2f, 16, C_WHITE);
 				
-				if (remote_has_shield) {
-					Vector2 remoteCenter = { rp.x + rp.width/2, rp.y + rp.height/2 };
+if (remote_has_shield[0]) {
+			Vector2 remoteCenter = { rp.x + rp.width/2, rp.y + rp.height/2 };
 					int pulse = 28 + (int)((std::sin(tick * 0.03) + 1) * 2);
 					DrawGlowCircle(remoteCenter, (float)pulse, C_GREEN, 75);
 					DrawCircleLines(remoteCenter.x, remoteCenter.y, pulse, C_GREEN);

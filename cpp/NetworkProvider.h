@@ -13,13 +13,14 @@
 //  5 = PlayerJoinPacket    (client sends to host on join)
 //  6 = PlayerListPacket    (host sends to all with player list & ready status)
 //  7 = ReadyStatusPacket   (client toggles ready state)
-//  8 = StartGamePacket     (host signals all to start game)
+//  9 = KeepAlivePacket   (client sends periodically to host)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #pragma pack(push, 1)
 
 struct PlayerStatePacket {
     uint8_t  type      = 1;
+    uint32_t playerId;
     float    x;
     float    y;
     float    vx;
@@ -36,6 +37,7 @@ struct SpawnMagmaPacket {
     float   h;
     float   speed;
 };
+
 
 struct CoinPickupPacket {
     uint8_t  type  = 3;
@@ -70,14 +72,16 @@ struct PlayerListPacket {
 struct ReadyStatusPacket {
     uint8_t  type = 7;
     bool     ready;
-    uint32_t playerId;
+    uint32_t playerId; // Use playerId for lookups, name is not relevant here
 };
 
 struct StartGamePacket {
     uint8_t type = 8;
 };
 
-#pragma pack(pop)
+struct KeepAlivePacket {
+    uint8_t type = 9;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 

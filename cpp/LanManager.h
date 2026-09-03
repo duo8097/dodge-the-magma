@@ -4,6 +4,7 @@
 #include "NetworkProvider.h"
 #include <vector>
 #include <string>
+#include <cstdint> // Include for uint64_t etc.
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -31,6 +32,7 @@ public:
     
     std::string GetStatus() const override { return m_statusMessage; }
     std::string GetMyId() const override;
+    uint32_t GetPlayerId() const { return m_myPlayerId; }
 
 private:
     LanManager() = default;
@@ -55,6 +57,7 @@ private:
     std::vector<ConnectedPlayer> m_players;
     
     uint32_t m_myPlayerId = 0;
+    std::string m_myPlayerName;
     bool m_isJoining = false;
     uint64_t m_lastJoinAttemptTime = 0;
     uint64_t m_lastPingTime = 0;

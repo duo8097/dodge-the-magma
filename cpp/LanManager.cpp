@@ -60,6 +60,8 @@ bool LanManager::Init() {
     m_isHost = false;
 
     m_isJoining = false;
+    m_myPlayerId = (uint32_t)rand() + 1;
+    m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
     m_statusMessage = "LAN Initialized";
     return true;
 }
@@ -77,8 +79,7 @@ void LanManager::Tick() {
                 joinPkt.type = 5;
                 joinPkt.playerId = m_myPlayerId;
                 
-                std::string myName = "Player_" + std::to_string(rand() % 10000 + 1000);
-                strncpy(joinPkt.name, myName.c_str(), 31);
+                strncpy(joinPkt.name, m_myPlayerName.c_str(), 31);
                 joinPkt.name[31] = '\0';
                 
                 sendto(sock, (const char*)&joinPkt, sizeof(joinPkt), 0, (struct sockaddr*)&m_hostAddress, sizeof(m_hostAddress));
@@ -117,6 +118,13 @@ void LanManager::Tick() {
                 m_statusMessage = "Disconnected (Timeout)";
                 if (onConnectionEstablished) onConnectionEstablished(false);
             }
+            // --- Bug #3 Fix: Send KeepAlivePacket periodically from client ---
+            else if (now - m_lastPingTime > 1000) { // Send keep-alive every 1 second
+                KeepAlivePacket alivePkt;
+                SendPacket(&alivePkt, sizeof(alivePkt));
+                m_lastPingTime = now; // Reset timer after sending
+            }
+            // --- End Bug #3 Fix ---
         }
     }
 }
@@ -206,6 +214,9 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_isJoining = true;
     m_lastJoinAttemptTime = GetTimeMs(); // Initialize join attempt timer
     m_lastPingTime = GetTimeMs();
+    if (m_myPlayerName.empty()) {
+        m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
+    }
 
 }
 
@@ -278,6 +289,17 @@ void LanManager::ReceiveData() {
                         if (onConnectionEstablished) onConnectionEstablished(true);
                     }
                 }
+                // --- Bug #1 Fix: Call onPlayerJoinReceived for the host --- 
+                PlayerJoinPacket joinPktForCallback;
+                joinPktForCallback.playerId = joinPkt->playerId;
+                strncpy(joinPktForCallback.name, joinPkt->name, 31);
+                joinPktForCallback.name[31] = '\0';
+                joinPktForCallback.isHost = m_players[idx].isHost; // Assuming idx is correctly found or set for the new player
+                if (onPlayerJoinReceived) {
+                    onPlayerJoinReceived(joinPktForCallback);
+                }
+                // --- End Bug #1 Fix ---
+
                 m_statusMessage = "Client Connected (UDP)!";
                 SendPlayerList();
 
@@ -308,19 +330,29 @@ void LanManager::ReceiveData() {
                 } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value);
-                } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
-                    auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
-                    m_players[idx].ready = pkt.ready;
-                    onReadyStatusReceived(pkt);
+            } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
+                auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
+                // Find player by ID, not name
+                int playerIndex = FindPlayerById(pkt.playerId);
+                if (playerIndex != -1) {
+                    m_players[playerIndex].ready = pkt.ready;
+                    onReadyStatusReceived(pkt); // Pass the packet with playerId
                     SendPlayerList(); // Broadcast updated list
                     continue; // Skip the standard forward below because SendPlayerList already broadcasts
                 }
-                
-                // Forward/relay to all other peers
-                for (const auto& other : m_players) {
-                    if (other.isHost || (other.addressValid && AddrEqual(other.address, senderAddr))) continue;
-                    sendto((socket_t)m_serverSocket, buffer, r, 0, (struct sockaddr*)&other.address, sizeof(other.address));
-                }
+            } else if (type == 9) { // KeepAlivePacket
+                // Just update last seen time, no further action needed
+                // idx is already found from the loop above
+                // m_players[idx].lastSeen = now; // This is handled by the loop already
+                continue; // Do not forward keep-alive packets
+            }
+            
+            // Forward/relay to all other peers
+            for (const auto& other : m_players) {
+                if (other.isHost || (other.addressValid && AddrEqual(other.address, senderAddr))) continue;
+                sendto((socket_t)m_serverSocket, buffer, r, 0, (struct sockaddr*)&other.address, sizeof(other.address));
+            }
+
             }
         } else {
             // Client handles packets, verify sender is the host
@@ -382,6 +414,19 @@ void LanManager::AddPlayer(uint32_t id, const char* name, bool isHost, bool addr
 
 void LanManager::RemovePlayer(int index) {
     if (index >= 0 && index < (int)m_players.size()) {
+        // --- Bug #4 Fix: Notify about player removal ---
+        if (onPlayerRemoved) {
+            // Need to pass player info to the callback
+            // Construct a PlayerJoinPacket-like structure or similar if available
+            // For now, assume we can pass playerId and name
+            PlayerJoinPacket removedPlayerData;
+            removedPlayerData.playerId = m_players[index].playerId;
+            strncpy(removedPlayerData.name, m_players[index].name, 31);
+            removedPlayerData.name[31] = '\0';
+            removedPlayerData.isHost = m_players[index].isHost; // This might be misleading if player was not host
+            onPlayerRemoved(removedPlayerData);
+        }
+        // --- End Bug #4 Fix ---
         m_players.erase(m_players.begin() + index);
     }
 }
