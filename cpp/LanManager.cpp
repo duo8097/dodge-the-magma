@@ -338,32 +338,55 @@ void LanManager::ReceiveData() {
                 if (r != sizeof(PlayerJoinPacket)) continue;
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 PlayerJoinPacket* joinPkt = reinterpret_cast<PlayerJoinPacket*>(buffer);
-                
-                int idx = FindPlayerById(joinPkt->playerId);
-                if (idx == -1) {
-                    if (m_players.size() < 4) {
-                        AddPlayer(joinPkt->playerId, joinPkt->name, false, true, &senderAddr);
-                        std::cout << "Player joined: " << joinPkt->name << " ID: " << joinPkt->playerId << std::endl;
-                        m_isConnected = true; // Now connected to at least one client
-                        if (onConnectionEstablished) onConnectionEstablished(true);
-                    }
-                } else {
-                    // Update existing player address and lastSeen
-                    m_players[idx].address = senderAddr;
-                    m_players[idx].addressValid = true;
+
+                // Bug #44 fix: identity is bound to sender address, not the
+                // playerId in the wire packet. First, see if this exact
+                // address already has a slot (the legitimate reconnect case).
+                int idx = FindPlayerByAddress(senderAddr);
+                if (idx != -1) {
+                    // Legitimate reconnect from the same peer. Trust the
+                    // existing playerId — do NOT overwrite it from the wire,
+                    // otherwise any peer could hijack their own slot's ID,
+                    // and a separate address-spoofing attacker could not
+                    // rebind here either because AddrEqual already matched.
                     m_players[idx].lastSeen = now;
-                    // If the host was disconnected (e.g. player timed out) and this player re-joins, we need to re-establish connection state
                     if (!m_isConnected) {
                         m_isConnected = true;
                         if (onConnectionEstablished) onConnectionEstablished(true);
                     }
+                } else {
+                    // Unknown address. If the claimed playerId is already in
+                    // use by a *different* address, this is a hijack attempt
+                    // — drop silently and do not add or rebind.
+                    int idIdx = FindPlayerById(joinPkt->playerId);
+                    if (idIdx != -1) {
+                        std::cout << "Warning: Join packet claimed playerId "
+                                  << joinPkt->playerId
+                                  << " from a different address, dropping."
+                                  << std::endl;
+                        continue;
+                    }
+                    // Fresh peer claiming a fresh id. Accept (still rate-
+                    // limited by the 4-player cap in AddPlayer).
+                    if (m_players.size() < 4) {
+                        AddPlayer(joinPkt->playerId, joinPkt->name, false, true, &senderAddr);
+                        std::cout << "Player joined: " << joinPkt->name
+                                  << " ID: " << joinPkt->playerId << std::endl;
+                        idx = (int)m_players.size() - 1;
+                        m_isConnected = true; // Now connected to at least one client
+                        if (onConnectionEstablished) onConnectionEstablished(true);
+                    } else {
+                        continue; // lobby full
+                    }
                 }
-                // --- Bug #1 Fix: Call onPlayerJoinReceived for the host --- 
+                // --- Bug #1 Fix: Call onPlayerJoinReceived for the host ---
                 PlayerJoinPacket joinPktForCallback;
-                joinPktForCallback.playerId = joinPkt->playerId;
-                strncpy(joinPktForCallback.name, joinPkt->name, 31);
+                // Always emit the authoritative playerId (from the slot we
+                // matched/created), not the raw wire value, so downstream
+                // consumers see a consistent identity.
+                joinPktForCallback.playerId = m_players[idx].playerId;
+                strncpy(joinPktForCallback.name, m_players[idx].name, 31);
                 joinPktForCallback.name[31] = '\0';
-                // isHost is not part of the wire packet; host/client roles are determined by sender address
                 if (onPlayerJoinReceived) {
                     onPlayerJoinReceived(joinPktForCallback);
                 }
@@ -535,6 +558,13 @@ int LanManager::FindPlayerByName(const char* name) {
 int LanManager::FindPlayerById(uint32_t id) {
     for (size_t i = 0; i < m_players.size(); ++i) {
         if (m_players[i].playerId == id) return (int)i;
+    }
+    return -1;
+}
+
+int LanManager::FindPlayerByAddress(const sockaddr_in& addr) {
+    for (size_t i = 0; i < m_players.size(); ++i) {
+        if (m_players[i].addressValid && AddrEqual(m_players[i].address, addr)) return (int)i;
     }
     return -1;
 }

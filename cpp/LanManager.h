@@ -81,6 +81,7 @@ private:
     void RemovePlayer(int index);
     int FindPlayerByName(const char* name);
     int FindPlayerById(uint32_t id);
+    int FindPlayerByAddress(const sockaddr_in& addr);
 };
 
 #endif // LAN_MANAGER_H

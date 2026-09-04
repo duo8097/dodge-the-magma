@@ -1137,6 +1137,15 @@ int main() {
 		};
 
 		g_network->onCoinPickupReceived = [](int count, int32_t newTeamCoins) {
+			// Bug #46 fix: only apply team_coins if it advances local state.
+			// Out-of-order delivery (EOS ReliableUnordered, UDP on LAN) can
+			// deliver an older pickup after a newer one, which would otherwise
+			// roll the team coin pool backwards and desync the shop economy.
+			// Spending actions are not broadcast via this packet, so any drop
+			// here is purely against stale/older pickups.
+			if (newTeamCoins < team_coins) {
+				return;
+			}
 			team_coins = newTeamCoins;
 		};
 		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t playerId, uint32_t transactionId) {
