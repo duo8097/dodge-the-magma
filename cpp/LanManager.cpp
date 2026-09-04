@@ -60,6 +60,17 @@ static bool AddrEqual(const sockaddr_in& a, const sockaddr_in& b) {
     return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
 
+void LanManager::GeneratePlayerId(uint32_t mixSalt) {
+    // Per-instance identity. mixSalt lets callers (HostGame/JoinGame) refresh
+    // the ID with extra entropy while Init() passes 0 to stay deterministic
+    // relative to (this, time). Two instances initialised within the same
+    // millisecond still get distinct IDs because (uintptr_t)this differs.
+    uint64_t t = GetTimeMs();
+    uint32_t r = (uint32_t)rand();
+    m_myPlayerId = (uint32_t)((t ^ (uint64_t)r ^ (uint64_t)mixSalt ^ (uintptr_t)this) & 0x7FFFFFFFu);
+    if (m_myPlayerId == 0) m_myPlayerId = 1;
+}
+
 LanManager& LanManager::Get() {
     static LanManager instance;
     return instance;
@@ -72,9 +83,9 @@ LanManager::~LanManager() {
 }
 
 bool LanManager::Init() {
-    // Close any sockets we already own. Don't call WSACleanupOnce here:
-    // we're paired WSAStartupOnce/WSACleanupOnce around the *instance*
-    // lifetime, not around individual Init/Shutdown cycles.
+    // Close any sockets we already own. WSAStartup/Cleanup are paired per-instance
+    // lifetime, not per-Init/Shutdown cycle: multiple Init() calls on one instance
+    // must not stack WSAStartup, and Shutdown() must not drop a refcount we don't own.
     if (m_clientSocket != INVALID_SOCKET_VAL) CLOSE_SOCKET((socket_t)m_clientSocket);
     if (m_serverSocket != INVALID_SOCKET_VAL) CLOSE_SOCKET((socket_t)m_serverSocket);
     m_clientSocket = INVALID_SOCKET_VAL;
@@ -84,21 +95,14 @@ bool LanManager::Init() {
     m_isJoining = false;
     m_players.clear();
 
-    WSAStartupOnce();
-    m_serverSocket = INVALID_SOCKET_VAL;
-    m_clientSocket = INVALID_SOCKET_VAL;
-    m_isHost = false;
-
-    m_isJoining = false;
-    // Use a per-call entropy mix so two instances initialised within the same
-    // millisecond still get distinct IDs. Previously both used the same
-    // srand(GetTimeMs()) seed and produced colliding IDs in same-process tests.
-    {
-        uint64_t t = GetTimeMs();
-        uint32_t r = (uint32_t)rand();
-        m_myPlayerId = (uint32_t)((t ^ (uint64_t)r ^ ((uintptr_t)this)) & 0x7FFFFFFFu);
-        if (m_myPlayerId == 0) m_myPlayerId = 1;
+    if (!m_wsaInitialized) {
+        WSAStartupOnce();
+        m_wsaInitialized = true;
     }
+
+    // Per-instance identity. mixSalt=0 keeps Init() deterministic relative to (this),
+    // while HostGame()/JoinGame() pass extra entropy to refresh the identity.
+    GeneratePlayerId(0);
     m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
     m_statusMessage = "LAN Initialized";
     return true;
@@ -179,7 +183,10 @@ void LanManager::Shutdown() {
     m_isConnected = false;
     m_isJoining = false;
     m_players.clear();
-    WSACleanupOnce();
+    if (m_wsaInitialized) {
+        WSACleanupOnce();
+        m_wsaInitialized = false;
+    }
 }
 
 void LanManager::HostGame() {
@@ -188,10 +195,7 @@ void LanManager::HostGame() {
     m_statusMessage = "Hosting LAN (UDP)...";
     m_players.clear();
 
-    srand(static_cast<unsigned int>(GetTimeMs()));
-    m_myPlayerId = (uint32_t)((GetTimeMs() ^ (uint64_t)((uintptr_t)this)) & 0x7FFFFFFFu);
-    if (m_myPlayerId == 0) m_myPlayerId = 1;
-
+    GeneratePlayerId(0);
     std::string myName = "Player_" + std::to_string(m_myPlayerId);
     AddPlayer(m_myPlayerId, myName.c_str(), true); // Add host as first player
     
@@ -228,9 +232,9 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_statusMessage = "Joining LAN (UDP)...";
     m_players.clear();
 
-    srand(static_cast<unsigned int>(GetTimeMs()));
-    m_myPlayerId = (uint32_t)((GetTimeMs() ^ 0x9E3779B9u ^ (uintptr_t)this) & 0x7FFFFFFFu);
-    if (m_myPlayerId == 0) m_myPlayerId = 1;
+    // Distinct salt so a client that has previously hosted on the same instance
+    // gets a fresh identity, while keeping ID generation in one place.
+    GeneratePlayerId(0x9E3779B9u);
     
     if (m_clientSocket != INVALID_SOCKET_VAL) {
         CLOSE_SOCKET((socket_t)m_clientSocket);

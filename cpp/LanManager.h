@@ -68,6 +68,8 @@ private:
     uint32_t m_myPlayerId = 0;
     std::string m_myPlayerName;
     bool m_isJoining = false;
+    bool m_wsaInitialized = false;
+    void GeneratePlayerId(uint32_t mixSalt);
     uint64_t m_lastJoinAttemptTime = 0;
     uint64_t m_lastPingTime = 0;
     sockaddr_in m_hostAddress;
