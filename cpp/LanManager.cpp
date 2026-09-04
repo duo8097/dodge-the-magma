@@ -22,6 +22,7 @@
 
 #define LAN_PORT 45678
 
+static uint64_t GetTimeMs();
 static int g_wsaRefcount = 0;
 static void WSAStartupOnce() {
 #ifdef _WIN32
@@ -30,6 +31,14 @@ static void WSAStartupOnce() {
         WSAStartup(MAKEWORD(2, 2), &wsaData);
     }
 #endif
+    // Seed rand() exactly once per process so GeneratePlayerId() doesn't
+    // produce the same series across all instances (regression bug #38).
+    // Guarded with a separate static so non-Windows builds still seed.
+    static bool srandSeeded = false;
+    if (!srandSeeded) {
+        std::srand(static_cast<unsigned int>(GetTimeMs()) ^ 0x9E3779B9u);
+        srandSeeded = true;
+    }
 }
 static void WSACleanupOnce() {
 #ifdef _WIN32
@@ -327,6 +336,7 @@ void LanManager::ReceiveData() {
             // Host handles packets
             if (type == 5) { // PlayerJoinPacket
                 if (r != sizeof(PlayerJoinPacket)) continue;
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 PlayerJoinPacket* joinPkt = reinterpret_cast<PlayerJoinPacket*>(buffer);
                 
                 int idx = FindPlayerById(joinPkt->playerId);
@@ -401,7 +411,12 @@ void LanManager::ReceiveData() {
                     pkt.playerId = m_players[idx].playerId;
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
             } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
+                // Override wire playerId with the sender we authenticated by
+                // address, preventing a malicious client from toggling
+                // someone else's ready state.
+                pkt.playerId = m_players[idx].playerId;
                 // Find player by ID, not name
                 int playerIndex = FindPlayerById(pkt.playerId);
                 if (playerIndex != -1) {
@@ -411,6 +426,7 @@ void LanManager::ReceiveData() {
                     continue; // Skip the standard forward below because SendPlayerList already broadcasts
                 }
             } else if (type == 9) { // KeepAlivePacket
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 // Just update last seen time, no further action needed
                 // idx is already found from the loop above
                 // m_players[idx].lastSeen = now; // This is handled by the loop already
@@ -437,6 +453,7 @@ void LanManager::ReceiveData() {
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer));
             } else if (type == 2 && onMagmaSpawnReceived && r == sizeof(SpawnMagmaPacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer));
             } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
                 if (!ProtocolVersionOK(buffer, r)) continue;
@@ -449,6 +466,7 @@ void LanManager::ReceiveData() {
                     // sender mapping), so transaction dedup is correct per-player.
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
             } else if (type == 6 && onPlayerListReceived && r == sizeof(PlayerListPacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<PlayerListPacket*>(buffer);
                 if (pkt.count <= 4) {
                     m_players.clear();

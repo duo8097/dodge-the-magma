@@ -37,7 +37,8 @@ struct PlayerStatePacket {
 };
 
 struct SpawnMagmaPacket {
-    uint8_t type  = 2;
+    uint8_t type = 2;
+    uint8_t protocolVersion = 1;
     float   x;
     float   y;
     float   w;
@@ -64,6 +65,7 @@ struct TeamUpgradePacket {
 
 struct PlayerJoinPacket {
     uint8_t  type = 5;
+    uint8_t  protocolVersion = 1;
     uint32_t playerId;
     char     name[32];
 };
@@ -77,12 +79,14 @@ struct PlayerInfo {
 
 struct PlayerListPacket {
     uint8_t type = 6;
+    uint8_t protocolVersion = 1;
     uint8_t count;
     PlayerInfo players[4];
 };
 
 struct ReadyStatusPacket {
     uint8_t  type = 7;
+    uint8_t  protocolVersion = 1;
     bool     ready;
     uint32_t playerId; // Use playerId for lookups, name is not relevant here
 };
@@ -95,6 +99,7 @@ struct StartGamePacket {
 
 struct KeepAlivePacket {
     uint8_t type = 9;
+    uint8_t protocolVersion = 1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

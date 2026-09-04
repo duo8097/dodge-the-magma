@@ -49,6 +49,7 @@ private:
 
     bool m_isJoining = false;
     uint64_t m_lastJoinAttemptTime = 0;
+    std::string m_myPlayerName;
 
     void LoginSuccess(EOS_ProductUserId localUserId);
 

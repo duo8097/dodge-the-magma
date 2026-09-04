@@ -151,7 +151,8 @@ static void Packet_PlayerList_capacity() {
     CHECK(p.players[1].isHost == false);
     CHECK(p.count == 2);
     // LAN is capped at 4 players per LanManager::AddPlayer / PlayerListPacket.
-    CHECK(sizeof(PlayerListPacket) == 1 + 1 + sizeof(PlayerInfo) * 4);
+    // Layout: type(1) + protocolVersion(1) + count(1) + 4 * PlayerInfo.
+    CHECK(sizeof(PlayerListPacket) == 1 + 1 + 1 + sizeof(PlayerInfo) * 4);
 }
 
 static void Packet_ReadyStatus_carries_playerId() {

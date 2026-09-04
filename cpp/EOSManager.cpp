@@ -66,23 +66,28 @@ bool EOSManager::Init() {
 void EOSManager::Tick() {
     if (m_platform) {
         EOS_Platform_Tick(m_platform);
-        
+
         uint64_t now = GetTimeMs();
         if (!m_isHost && m_isJoining && m_remotePUID) {
             if (now - m_lastJoinAttemptTime >= 500) {
                 m_lastJoinAttemptTime = now;
-                
+
                 PlayerJoinPacket joinPkt;
                 joinPkt.type = 5;
+                joinPkt.protocolVersion = CURRENT_PROTOCOL_VERSION;
                 joinPkt.playerId = GetPlayerId();
-                std::string myName = "Player_" + std::to_string(rand() % 10000 + 1000);
+                // Use cached name (set in JoinGame) so every retry sends the
+                // same identity. Previously a fresh rand() each retry produced
+                // a different name for the same player — bug #41.
+                std::string myName = m_myPlayerName;
+                if (myName.empty()) myName = "Player_" + std::to_string(joinPkt.playerId);
                 strncpy(joinPkt.name, myName.c_str(), 31);
                 joinPkt.name[31] = '\0';
-                
+
                 SendPacket(&joinPkt, sizeof(joinPkt));
             }
         }
-        
+
         if (m_isConnected) {
             ReceivePackets();
         }
@@ -115,6 +120,7 @@ void EOSManager::Shutdown() {
     m_isHost = false;
     m_isConnected = false;
     m_isJoining = false;
+    m_myPlayerName.clear();
     m_statusMessage = "Offline";
     EOS_Shutdown();
 }
@@ -202,6 +208,10 @@ void EOSManager::JoinGame(const std::string& addressOrId) {
     if (m_remotePUID) {
         m_isJoining = true;
         m_lastJoinAttemptTime = 0;
+        // Lock in the player's display name for the lifetime of this join
+        // attempt. Identical to the LAN path so both transports show the same
+        // identity. Reset in Shutdown().
+        m_myPlayerName = "Player_" + std::to_string(GetPlayerId());
         m_statusMessage = "Joining...";
     } else {
         m_statusMessage = "Invalid PUID format";
@@ -277,9 +287,9 @@ void EOSManager::ReceivePackets() {
         
         if (EOS_P2P_ReceivePacket(m_p2p, &recvOpts, &outPeerId, &outSocketId, &outChannel, buffer.data(), &outBytes) == EOS_EResult::EOS_Success && outBytes > 0) {
             uint8_t type = buffer[0];
-            if (outBytes >= 2 && buffer[1] != CURRENT_PROTOCOL_VERSION
-                && (type == 1 || type == 3 || type == 4 || type == 8)) {
-                // versioned packet from a mismatched build — drop silently
+            if (outBytes >= 2 && buffer[1] != CURRENT_PROTOCOL_VERSION) {
+                // All currently-versioned packet types now carry a protocolVersion
+                // byte (was previously only types 1/3/4/8). Drop mismatched builds.
                 continue;
             }
             if (type == 1 && onPlayerStateReceived && outBytes == sizeof(PlayerStatePacket)) {
