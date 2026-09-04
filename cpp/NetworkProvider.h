@@ -19,13 +19,13 @@
 // Bump this whenever a packet struct's wire layout changes. Receivers reject
 // packets whose protocolVersion != CURRENT_PROTOCOL_VERSION to avoid silent
 // corruption when two clients run different builds.
-static constexpr uint8_t CURRENT_PROTOCOL_VERSION = 1;
+inline constexpr uint8_t CURRENT_PROTOCOL_VERSION = 2;
 
 #pragma pack(push, 1)
 
 struct PlayerStatePacket {
     uint8_t  type      = 1;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
     uint32_t playerId;
     uint32_t sequenceId; // Added for ordering (was uint16_t, now uint32_t to prevent wrap)
     float    x;
@@ -38,7 +38,7 @@ struct PlayerStatePacket {
 
 struct SpawnMagmaPacket {
     uint8_t type = 2;
-    uint8_t protocolVersion = 1;
+    uint8_t protocolVersion = CURRENT_PROTOCOL_VERSION;
     float   x;
     float   y;
     float   w;
@@ -49,23 +49,28 @@ struct SpawnMagmaPacket {
 
 struct CoinPickupPacket {
     uint8_t  type      = 3;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
+    uint8_t  isRequest = 0; // 0 = authoritative broadcast (host→client),
+                            // 1 = pickup request (client→host)
     int32_t  count;          // number of coins just collected by sender
-    int32_t  team_coins;     // total team coins after this pickup (authoritative)
+    int32_t  team_coins;     // total team coins after this pickup (authoritative when !isRequest)
+    uint32_t playerId;       // sender's playerId (required when isRequest=1)
 };
 
 struct TeamUpgradePacket {
     uint8_t  type       = 4;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
     uint8_t  upgrade_id; // 0=speed  1=jump  2=shield  3=magnet
-    int32_t  new_value;  // stat value after upgrade (applied on receiver side)
+    uint8_t  isRequest = 0; // 0 = authoritative broadcast (host→client),
+                            // 1 = shop request (client→host)
+    int32_t  new_value;  // stat value after upgrade (authoritative when !isRequest)
     uint32_t playerId;   // sender's playerId so receivers can dedupe per-sender
     uint32_t transaction_id; // Transaction ID for idempotent purchases
 };
 
 struct PlayerJoinPacket {
     uint8_t  type = 5;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
     uint32_t playerId;
     char     name[32];
 };
@@ -79,27 +84,27 @@ struct PlayerInfo {
 
 struct PlayerListPacket {
     uint8_t type = 6;
-    uint8_t protocolVersion = 1;
+    uint8_t protocolVersion = CURRENT_PROTOCOL_VERSION;
     uint8_t count;
     PlayerInfo players[4];
 };
 
 struct ReadyStatusPacket {
     uint8_t  type = 7;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
     bool     ready;
     uint32_t playerId; // Use playerId for lookups, name is not relevant here
 };
 
 struct StartGamePacket {
     uint8_t type      = 8;
-    uint8_t  protocolVersion = 1;
+    uint8_t  protocolVersion = CURRENT_PROTOCOL_VERSION;
     uint32_t sessionId; // Session/game ID for ordering and correlation
 };
 
 struct KeepAlivePacket {
     uint8_t type = 9;
-    uint8_t protocolVersion = 1;
+    uint8_t protocolVersion = CURRENT_PROTOCOL_VERSION;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,12 +136,16 @@ public:
     std::function<void(const SpawnMagmaPacket&)>     onMagmaSpawnReceived;
     std::function<void(bool)>                        onConnectionEstablished;
     std::function<void(int /*count*/, int32_t /*teamCoins*/)>               onCoinPickupReceived;    // team coin sync
+    std::function<void(int /*count*/, uint32_t /*playerId*/)>               onCoinPickupRequest;     // bug #52: client → host pickup request
     std::function<void(uint8_t /*id*/, int32_t, uint32_t /*playerId*/, uint32_t /*txId*/)>  onTeamUpgradeReceived;  // team shop sync
+    std::function<void(const TeamUpgradePacket&)>                                   onTeamShopRequest;     // bug #53: client → host purchase request
     std::function<void(const PlayerJoinPacket&)>     onPlayerJoinReceived;
     std::function<void(const PlayerJoinPacket&)>     onPlayerRemoved;        // player left lobby
     std::function<void(const PlayerListPacket&)>     onPlayerListReceived;
     std::function<void(const ReadyStatusPacket&)>    onReadyStatusReceived;
     std::function<void(const StartGamePacket&)>      onStartGameReceived;
 };
+
+#pragma pack(pop)
 
 #endif // NETWORK_PROVIDER_H

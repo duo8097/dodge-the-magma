@@ -31,6 +31,8 @@
 #include <chrono>
 #include <mutex>
 #include <functional>
+#include <map>
+#include <atomic>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -85,7 +87,7 @@ static std::string g_currentTest;
 static void Packet_PlayerState_size_and_layout() {
     PlayerStatePacket p;
     p.type = 1;
-    p.protocolVersion = 1;
+    p.protocolVersion = CURRENT_PROTOCOL_VERSION;
     p.playerId = 0x11223344u;
     p.sequenceId = 0x55667788u;
     p.x = 12.5f; p.y = -3.25f;
@@ -114,11 +116,11 @@ static void Packet_PlayerState_size_and_layout() {
 static void Packet_CoinPickup_team_coins_authoritative() {
     CoinPickupPacket p;
     p.type = 3;
-    p.protocolVersion = 1;
+    p.protocolVersion = CURRENT_PROTOCOL_VERSION;
     p.count = 5;
     p.team_coins = 230; // sender claims "we now have 230 total"
 
-    CHECK(sizeof(CoinPickupPacket) == 1 + 1 + 4 + 4);
+    CHECK(sizeof(CoinPickupPacket) == 1 + 1 + 1 + 4 + 4 + 4);
 
     // The receiver should trust team_coins as authoritative,
     // not accumulate `count`. (See README "Team Coins".)
@@ -134,7 +136,7 @@ static void Packet_TeamUpgrade_transaction_id_unique() {
     TeamUpgradePacket a; a.type = 4; a.upgrade_id = 2; a.new_value = 3; a.transaction_id = 1001;
     TeamUpgradePacket b; b.type = 4; b.upgrade_id = 2; b.new_value = 3; b.transaction_id = 1002;
     CHECK(a.transaction_id != b.transaction_id);
-    CHECK(sizeof(TeamUpgradePacket) == 1 + 1 + 1 + 4 + 4 + 4);
+    CHECK(sizeof(TeamUpgradePacket) == 1 + 1 + 1 + 1 + 4 + 4 + 4);
 }
 
 static void Packet_PlayerList_capacity() {
@@ -292,11 +294,10 @@ static void Mock_TeamUpgrade_applies_to_both_sides() {
     // Buyer purchases shield: +1 level
     TeamUpgradePacket pkt;
     pkt.type = 4;
-    pkt.protocolVersion = 1;
+    pkt.protocolVersion = CURRENT_PROTOCOL_VERSION;
     pkt.upgrade_id = 2;          // shield
-    pkt.new_value = ++pkt.new_value; // 0 -> 1 (just illustrative)
     myShield = 1;
-    pkt.new_value = myShield;
+    pkt.new_value = myShield;     // direct assignment, no UB
     pkt.transaction_id = ++txCounter;
 
     // Serialize and ship to receiver
@@ -363,21 +364,24 @@ static void Mock_Lobby_ready_up_flow() {
 // that mimics what a client would send.
 // ─────────────────────────────────────────────────────────────────────────────
 
-static bool g_socketInited = false;
+static std::atomic<bool> g_socketInited{false};
 static void EnsureSocketsInited() {
-    if (g_socketInited) return;
+    // Bug fix: use compare_exchange to make the test-and-set atomic.
+    // Was a plain bool read/write race when called from a test thread
+    // concurrently with the main thread.
+    bool expected = false;
+    if (!g_socketInited.compare_exchange_strong(expected, true)) return;
 #ifdef _WIN32
     WSADATA ws; WSAStartup(MAKEWORD(2,2), &ws);
 #endif
-    g_socketInited = true;
 }
 
 static void TeardownSockets() {
-    if (!g_socketInited) return;
+    bool expected = true;
+    if (!g_socketInited.compare_exchange_strong(expected, false)) return;
 #ifdef _WIN32
     WSACleanup();
 #endif
-    g_socketInited = false;
 }
 
 static socket_t MakeUdpSocket() {
@@ -507,23 +511,54 @@ static void Lan_Host_receives_coin_pickup_and_forwards() {
     }
     CHECK(host.GetPlayerCount() >= 2);
 
-    // Now send a CoinPickupPacket. Host should fire onCoinPickupReceived.
+    // Now send a CoinPickupPacket as a CLIENT REQUEST (isRequest=1). Host
+    // should fire onCoinPickupRequest; the test fixture simulates the
+    // host-side apply by recording the request.
     CoinPickupPacket coin;
     coin.type = 3;
-    coin.protocolVersion = 1;
+    coin.protocolVersion = CURRENT_PROTOCOL_VERSION;
+    coin.isRequest = 1;
     coin.count = 3;
-    coin.team_coins = 333;
+    coin.team_coins = 0;
+    coin.playerId = 4242;
+    std::atomic<int> requestEvents{0};
+    std::atomic<int> lastCount{0};
+    host.onCoinPickupRequest = [&](int c, uint32_t /*playerId*/) {
+        requestEvents.fetch_add(1);
+        lastCount.store(c);
+        // Simulate the host-side apply: synthesize an authoritative
+        // broadcast back to ourselves so onCoinPickupReceived fires.
+        CoinPickupPacket auth;
+        auth.type = 3;
+        auth.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        auth.isRequest = 0;
+        auth.count = c;
+        auth.team_coins = c;
+        auth.playerId = 4242;
+        host.SendPacket(&auth, sizeof(auth));
+    };
+    host.onCoinPickupReceived = [&](int c, int32_t newTeam) {
+        coinEvents.fetch_add(1);
+        lastTeamCoins.store(newTeam);
+    };
     SendToHost(peer, &coin, sizeof(coin));
 
     auto t1 = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - t1 < std::chrono::seconds(5)) {
         host.Tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        if (coinEvents.load() >= 1) break;
+        if (requestEvents.load() >= 1) break;
     }
-
-    CHECK(coinEvents.load() == 1);
-    CHECK(lastTeamCoins.load() == 333);
+    CHECK(requestEvents.load() == 1);
+    CHECK(lastCount.load() == 3);
+    // Verify the peer socket captured the authoritative broadcast.
+    bool peerSawAuth = false;
+    auto t2 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t2 < std::chrono::seconds(5)) {
+        if (rxBuf.gotCoin) { peerSawAuth = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(peerSawAuth);
 
     stop.store(true);
     CLOSE_SOCK(peer);
@@ -537,7 +572,21 @@ static void Lan_Host_receives_team_upgrade_and_forwards() {
     host.HostGame();
 
     std::atomic<int> upEvents{0};
+    std::atomic<int> reqEvents{0};
     int32_t lastNewValue = -1;
+    // Host binds the request handler to validate the bug #53 / #57 protocol:
+    // clients must send isRequest=1; only the host replies with isRequest=0.
+    host.onTeamShopRequest = [&](const TeamUpgradePacket& req) {
+        reqEvents.fetch_add(1);
+        TeamUpgradePacket auth;
+        auth.type = 4;
+        auth.upgrade_id = req.upgrade_id;
+        auth.isRequest = 0;
+        auth.new_value = 2;
+        auth.playerId = req.playerId;
+        auth.transaction_id = req.transaction_id;
+        host.SendPacket(&auth, sizeof(auth));
+    };
     host.onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t newValue, uint32_t, uint32_t) {
         upEvents.fetch_add(1);
         lastNewValue = newValue;
@@ -564,12 +613,16 @@ static void Lan_Host_receives_team_upgrade_and_forwards() {
     }
     CHECK(host.GetPlayerCount() >= 2);
 
-    // Send a TeamUpgradePacket (e.g., magnet).
+    // Send a TeamUpgradePacket as a CLIENT REQUEST (isRequest=1). Host should
+    // fire onTeamShopRequest and re-broadcast authoritative (isRequest=0),
+    // which triggers onTeamUpgradeReceived.
     TeamUpgradePacket up;
     up.type = 4;
-    up.protocolVersion = 1;
+    up.protocolVersion = CURRENT_PROTOCOL_VERSION;
+    up.isRequest = 1;
     up.upgrade_id = 3; // magnet
-    up.new_value = 2;
+    up.new_value = 0;
+    up.playerId = 8888;
     up.transaction_id = 9999;
     SendToHost(peer, &up, sizeof(up));
 
@@ -577,10 +630,19 @@ static void Lan_Host_receives_team_upgrade_and_forwards() {
     while (std::chrono::steady_clock::now() - t1 < std::chrono::seconds(5)) {
         host.Tick();
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-if (upEvents.load() >= 1) break;
+        if (reqEvents.load() >= 1) break;
     }
-    CHECK(upEvents.load() == 1);
-    CHECK(lastNewValue == 2);
+    // Host is the sender of the authoritative reply; it does not receive its
+    // own broadcast. Verify the request fired and the peer socket captured
+    // the broadcast packet.
+    CHECK(reqEvents.load() == 1);
+    bool peerSawAuth = false;
+    auto t2 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t2 < std::chrono::seconds(5)) {
+        if (rxBuf.gotUpgrade) { peerSawAuth = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(peerSawAuth);
 
     stop.store(true);
     CLOSE_SOCK(peer);
@@ -652,6 +714,10 @@ struct DualSession {
         if (client) { client->Shutdown(); delete client; client = nullptr; }
         if (host)   { host->Shutdown();   delete host;   host   = nullptr; }
     }
+    // RAII: if a CHECK() in the test body aborts the function early (e.g.
+    // throw or early-return), shutdown() may never run and we leak the
+    // LanManager instances + their open sockets. Destructor catches that.
+    ~DualSession() { shutdown(); }
 };
 
 static void Dual_HostClient_join_and_stay_connected() {
@@ -735,14 +801,13 @@ static void Dual_JoinLeaveReconnect() {
     clientB.Init();
     clientB.JoinGame("127.0.0.1");
     std::thread thB([&]() {
-        std::atomic<bool> stopB{false};
-        // We'll just drive it manually here.
+        // Just tick manually for a few seconds; no signal needed because
+        // we have a deadline.
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         while (std::chrono::steady_clock::now() < deadline) {
             clientB.Tick();
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        (void)stopB;
     });
     ok = s.waitUntil(std::chrono::seconds(5), [&] {
         return s.host->GetPlayerCount() >= 3;
@@ -793,13 +858,31 @@ static void Dual_PacketSpam_dedup_transactions() {
     s.startClient();
     s.startTicking();
 
+    // Bind on the CLIENT — that's where authoritative broadcasts are observed.
     std::atomic<int> upEvents{0};
     int32_t lastValue = -1;
     std::vector<uint32_t> seenTxIds;
-    s.host->onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t nv, uint32_t, uint32_t tx) {
+    s.client->onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t nv, uint32_t, uint32_t tx) {
         upEvents.fetch_add(1);
         lastValue = nv;
         seenTxIds.push_back(tx);
+    };
+    // Host mirrors production game-side apply: each unique tx produces one
+    // authoritative reply. The test verifies host dedup is keyed correctly.
+    std::map<uint32_t, uint32_t> hostSeen;
+    s.host->onTeamShopRequest = [&](const TeamUpgradePacket& req) {
+        auto it = hostSeen.find(req.playerId);
+        if (it != hostSeen.end() && req.transaction_id <= it->second) return; // dedup
+        hostSeen[req.playerId] = req.transaction_id;
+        TeamUpgradePacket auth;
+        auth.type = 4;
+        auth.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        auth.isRequest = 0;
+        auth.upgrade_id = req.upgrade_id;
+        auth.new_value = 7;
+        auth.playerId = req.playerId;
+        auth.transaction_id = req.transaction_id;
+        s.host->SendPacket(&auth, sizeof(auth));
     };
 
     bool ok = s.waitUntil(std::chrono::seconds(5), [&] {
@@ -807,13 +890,17 @@ static void Dual_PacketSpam_dedup_transactions() {
     });
     CHECK(ok);
 
-    // Spam the same TeamUpgradePacket 50 times with the SAME transaction_id.
+    // Spam the same TeamUpgradeRequest 50 times with the SAME transaction_id.
+    // Bug #57: clients must use isRequest=1 — host only accepts authoritative
+    // broadcasts from itself.
     auto spam = [&](uint32_t tx, int32_t v) {
         TeamUpgradePacket up;
         up.type = 4;
-        up.protocolVersion = 1;
+        up.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        up.isRequest = 1;
         up.upgrade_id = 3;
-        up.new_value = v;
+        up.new_value = 0;
+        up.playerId = s.client->GetPlayerId();
         up.transaction_id = tx;
         s.client->SendPacket(&up, sizeof(up));
     };
@@ -828,8 +915,9 @@ static void Dual_PacketSpam_dedup_transactions() {
     // Give UDP time to deliver any remaining duplicates before we assert.
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // We don't enforce strict dedup (host doesn't dedup by transaction_id
-    // yet), but we *do* require: the LAST value seen is the spam value,
+    // Host dedups by transaction_id now (bug H1), so we expect either 1 or
+    // a small handful of accepted requests to be echoed back as
+    // authoritative broadcasts, but the *last* value seen is the spam value
     // and the transaction_id appears at least once.
     bool sawA = false;
     for (auto tx : seenTxIds) if (tx == txA) { sawA = true; break; }
@@ -849,7 +937,6 @@ static void Dual_Lobby_transition_loop() {
     s.startClient();
     s.startTicking();
 
-    int startGameEvents = 0;
     std::atomic<int> startGameEventsAt{0};
     s.client->onStartGameReceived = [&](const StartGamePacket&) { startGameEventsAt.fetch_add(1); };
 
@@ -877,7 +964,7 @@ static void Dual_Lobby_transition_loop() {
         // Host sends StartGamePacket directly.
         StartGamePacket sg;
         sg.type = 8;
-        sg.protocolVersion = 1;
+        sg.protocolVersion = CURRENT_PROTOCOL_VERSION;
         sg.sessionId = 0x1000u + (uint32_t)i;
         s.host->SendPacket(&sg, sizeof(sg));
 
@@ -911,7 +998,22 @@ static void Dual_Disconnect_mid_transaction() {
 
     std::atomic<int> coinEvents{0};
     std::atomic<int32_t> lastTeam{-1};
-    s.host->onCoinPickupReceived = [&](int /*c*/, int32_t t) {
+    // Simulate host-side apply: take the request and reply with an
+    // authoritative broadcast (mirrors game-side onCoinPickupRequest handler).
+    std::atomic<int> reqEvents{0};
+    s.host->onCoinPickupRequest = [&](int c, uint32_t pid) {
+        reqEvents.fetch_add(1);
+        CoinPickupPacket auth;
+        auth.type = 3;
+        auth.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        auth.isRequest = 0;
+        auth.count = c;
+        auth.team_coins = (int32_t)(c) + 999; // arbitrary authoritative value
+        auth.playerId = pid;
+        s.host->SendPacket(&auth, sizeof(auth));
+    };
+    // Bind on the CLIENT — authoritative broadcast lands there.
+    s.client->onCoinPickupReceived = [&](int /*c*/, int32_t t) {
         coinEvents.fetch_add(1);
         lastTeam.store(t);
     };
@@ -921,18 +1023,19 @@ static void Dual_Disconnect_mid_transaction() {
     });
     CHECK(ok);
 
-    // Client sends a coin pickup with team_coins = 999, then immediately
-    // "disconnects" (Shutdown). Host should still observe the pickup.
+    // Client sends a coin pickup REQUEST (isRequest=1) — bug #57.
     CoinPickupPacket cp;
     cp.type = 3;
-    cp.protocolVersion = 1;
+    cp.protocolVersion = CURRENT_PROTOCOL_VERSION;
+    cp.isRequest = 1;
     cp.count = 1;
-    cp.team_coins = 999;
+    cp.team_coins = 0;
+    cp.playerId = s.client->GetPlayerId();
     s.client->SendPacket(&cp, sizeof(cp));
 
     ok = s.waitUntil(std::chrono::seconds(5), [&] { return coinEvents.load() >= 1; });
     CHECK(ok);
-    CHECK(lastTeam.load() == 999);
+    CHECK(lastTeam.load() == 1000);
 
     // Now drop the client. The host thread keeps ticking; it should detect
     // the timeout (>4s no keep-alive) and remove the client on its own.
@@ -953,6 +1056,12 @@ static void Dual_Disconnect_mid_transaction() {
     s.client = new LanManager();
     s.client->Init();
     s.client->JoinGame("127.0.0.1");
+    // Re-bind onCoinPickupReceived on the new client so it observes the
+    // authoritative reply (bug #57 — only clients see authoritative packets).
+    s.client->onCoinPickupReceived = [&](int /*c*/, int32_t t) {
+        coinEvents.fetch_add(1);
+        lastTeam.store(t);
+    };
     s.stop.store(false);
     s.clientThread = std::thread([&]() {
         while (!s.stop.load()) {
@@ -966,9 +1075,11 @@ static void Dual_Disconnect_mid_transaction() {
 
     CoinPickupPacket cp2;
     cp2.type = 3;
-    cp2.protocolVersion = 1;
+    cp2.protocolVersion = CURRENT_PROTOCOL_VERSION;
+    cp2.isRequest = 1;
     cp2.count = 5;
-    cp2.team_coins = 1004; // 999 + 5
+    cp2.team_coins = 0;
+    cp2.playerId = s.client->GetPlayerId();
     s.client->SendPacket(&cp2, sizeof(cp2));
 
     bool got2 = s.waitUntil(std::chrono::seconds(5), [&] { return coinEvents.load() >= 2; });
@@ -990,29 +1101,54 @@ static void Dual_Burst_then_immediate_disconnect() {
     s.startTicking();
 
     std::atomic<int> ups{0};
-    s.host->onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t, uint32_t) { ups.fetch_add(1); };
+    // Host mirrors the production onTeamShopRequest handler — broadcast an
+    // authoritative packet for each accepted request.
+    s.host->onTeamShopRequest = [&](const TeamUpgradePacket& req) {
+        TeamUpgradePacket auth;
+        auth.type = 4;
+        auth.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        auth.isRequest = 0;
+        auth.upgrade_id = req.upgrade_id;
+        auth.new_value = req.new_value;
+        auth.playerId = req.playerId;
+        auth.transaction_id = req.transaction_id;
+        s.host->SendPacket(&auth, sizeof(auth));
+    };
+    // Verify on the CLIENT — that's where the authoritative broadcast lands.
+    s.client->onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t, uint32_t) { ups.fetch_add(1); };
 
     bool ok = s.waitUntil(std::chrono::seconds(5), [&] {
         return s.client->IsConnected() || s.host->GetPlayerCount() >= 2;
     });
     CHECK(ok);
 
-    // Spam 100 upgrade packets, then immediately Shutdown.
+    // Spam 100 upgrade REQUEST packets (isRequest=1).
     for (int i = 0; i < 100; ++i) {
         TeamUpgradePacket up;
         up.type = 4;
+        up.protocolVersion = CURRENT_PROTOCOL_VERSION;
+        up.isRequest = 1;
         up.upgrade_id = 3;
-        up.new_value = i;
+        up.new_value = 0;
+        up.playerId = s.client->GetPlayerId();
         up.transaction_id = 0xC000u + (uint32_t)i;
         s.client->SendPacket(&up, sizeof(up));
     }
+
+    // Wait a moment for the client to observe at least one authoritative
+    // broadcast before tearing it down (bug #57: broadcasts land on the
+    // client, not the host).
+    bool gotAny = s.waitUntil(std::chrono::seconds(5), [&] {
+        return ups.load() >= 1;
+    });
+    CHECK(gotAny);
 
     s.stop.store(true);
     if (s.clientThread.joinable()) s.clientThread.join();
     s.client->Shutdown();
     delete s.client; s.client = nullptr;
 
-    // Tick host for a bit and see how many it actually saw.
+    // Final tick window on the host.
     auto t = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     int peakUps = 0;
     while (std::chrono::steady_clock::now() < t) {

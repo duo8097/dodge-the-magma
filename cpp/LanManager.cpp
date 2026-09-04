@@ -28,7 +28,14 @@ static void WSAStartupOnce() {
 #ifdef _WIN32
     if (g_wsaRefcount++ == 0) {
         WSADATA wsaData;
-        WSAStartup(MAKEWORD(2, 2), &wsaData);
+        int rc = WSAStartup(MAKEWORD(2, 2), &wsaData);
+        if (rc != 0) {
+            // Roll back the refcount bump; subsequent socket() calls will
+            // fail with WSANOTINITIALISED, but at least we don't claim to
+            // have a successful startup.
+            g_wsaRefcount--;
+            std::cerr << "WSAStartup failed: " << rc << std::endl;
+        }
     }
 #endif
     // Seed rand() exactly once per process so GeneratePlayerId() doesn't
@@ -166,11 +173,18 @@ void LanManager::Tick() {
                 }
             }
             if (listChanged) {
+                bool wasConnected = m_isConnected;
                 m_isConnected = (m_players.size() > 1);
                 if (!m_isConnected) {
                     m_statusMessage = "Hosting LAN (UDP)...";
                 }
                 SendPlayerList();
+                // Bug fix: notify the game-side state machine when the host
+                // drops down to no peers, so is_multiplayer / lobby UI can
+                // reset to a consistent state instead of staying stale.
+                if (wasConnected && !m_isConnected && onConnectionEstablished) {
+                    onConnectionEstablished(false);
+                }
             }
         } else {
             // Client checks host timeout using a clean "last packet from host"
@@ -228,18 +242,30 @@ void LanManager::HostGame() {
     }
     
     socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock == INVALID_SOCKET_VAL) return;
-    
+    if (sock == INVALID_SOCKET_VAL) {
+        // Bug fix: socket() failed — roll back the optimistic state set above
+        // so the manager isn't left claiming "host" with no underlying socket.
+        m_isHost = false;
+        m_isConnected = false;
+        m_players.clear();
+        m_statusMessage = "Failed to create socket";
+        return;
+    }
+
     int opt = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-    
+
     sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(LAN_PORT);
-    
+
     if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VAL) {
         CLOSE_SOCKET(sock);
+        // Bug fix: bind() failed — same rollback as socket() failure.
+        m_isHost = false;
+        m_isConnected = false;
+        m_players.clear();
         m_statusMessage = "Failed to bind port";
         return;
     }
@@ -265,18 +291,22 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     }
     
     socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock == INVALID_SOCKET_VAL) return;
-    
+    if (sock == INVALID_SOCKET_VAL) {
+        // Bug fix: socket() failed — leave manager in a consistent state.
+        m_statusMessage = "Failed to create socket";
+        return;
+    }
+
     memset(&m_hostAddress, 0, sizeof(m_hostAddress));
     m_hostAddress.sin_family = AF_INET;
     m_hostAddress.sin_port = htons(LAN_PORT);
     int r = inet_pton(AF_INET, addressOrId.empty() ? "127.0.0.1" : addressOrId.c_str(), &m_hostAddress.sin_addr);
     if (r <= 0) {
-        m_statusMessage = "Invalid IP Address format";
         CLOSE_SOCKET(sock);
+        m_statusMessage = "Invalid IP Address format";
         return;
     }
-    
+
     SetNonBlocking(sock);
     m_clientSocket = (size_t)sock;
     m_isJoining = true;
@@ -365,12 +395,12 @@ void LanManager::ReceiveData() {
                     // Unknown address. If the claimed playerId is already in
                     // use by a *different* address, this is a hijack attempt
                     // — drop silently and do not add or rebind.
-                    int idIdx = FindPlayerById(joinPkt->playerId);
-                    if (idIdx != -1) {
-                        std::cout << "Warning: Join packet claimed playerId "
-                                  << joinPkt->playerId
-                                  << " from a different address, dropping."
-                                  << std::endl;
+                    // Reject playerId == 0 too: GeneratePlayerId never emits
+                    // 0, so any join claiming 0 is malformed or hostile.
+                    if (joinPkt->playerId == 0 ||
+                        FindPlayerById(joinPkt->playerId) != -1) {
+                        std::cout << "Warning: Join packet claimed invalid playerId "
+                                  << joinPkt->playerId << ", dropping." << std::endl;
                         continue;
                     }
                     // Fresh peer claiming a fresh id. Accept (still rate-
@@ -431,19 +461,28 @@ void LanManager::ReceiveData() {
                         continue;
                     }
                     onPlayerStateReceived(pkt);
-                } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
+                } else if (type == 3 && (onCoinPickupReceived || onCoinPickupRequest) && r == sizeof(CoinPickupPacket)) {
                     if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
-                    onCoinPickupReceived(pkt.count, pkt.team_coins);
-} else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
+                    // Security: only the host may send isRequest=0 (authoritative
+                    // broadcast). A client sending isRequest=0 is impersonating
+                    // an authoritative state update and must be dropped, even
+                    // though the sender is a registered peer.
+                    if (!pkt.isRequest) continue;
+                    pkt.playerId = m_players[idx].playerId;
+                    if (onCoinPickupRequest) onCoinPickupRequest(pkt.count, pkt.playerId);
+} else if (type == 4 && (onTeamUpgradeReceived || onTeamShopRequest) && r == sizeof(TeamUpgradePacket)) {
                     if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
-                    // Tag the packet with the sender's authoritative playerId so
-                    // the receiver can dedupe transactions per-player. If the
-                    // packet's playerId is missing/malicious we override with
-                    // the sender we already authenticated by address.
+                    // Same security gate as coin pickup: only the host may
+                    // produce authoritative state broadcasts. Reject forged
+                    // isRequest=0 from any client.
+                    if (!pkt.isRequest) continue;
                     pkt.playerId = m_players[idx].playerId;
-                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
+                    if (onTeamShopRequest) onTeamShopRequest(pkt);
+                        // Forward the request to other peers so host can
+                        // process it from any peer path (e.g. relayed).
+                        // Don't deliver as an authoritative upgrade here.
             } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
@@ -499,10 +538,16 @@ void LanManager::ReceiveData() {
             } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
+                // Clients should only see authoritative broadcasts. A stray
+                // request packet reaching a client (e.g. via a future relay
+                // path) is meaningless to apply.
+                if (pkt.isRequest) continue;
                 onCoinPickupReceived(pkt.count, pkt.team_coins);
             } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
                     if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
+                    // Authoritative only: drop client requests on clients.
+                    if (pkt.isRequest) continue;
                     // Trust host's playerId tag (host has already authoritative
                     // sender mapping), so transaction dedup is correct per-player.
                     onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);

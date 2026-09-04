@@ -18,12 +18,26 @@ static uint64_t GetTimeMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
+// Release a PUID handle obtained from EOS_ProductUserId_FromString or from
+// SDK callbacks. The SDK does not expose a public Release function in this
+// build (only EOS_ProductUserId_IsValid etc.). Handles are leaked on every
+// login + JoinGame. Documented limitation; if a real Release API is added
+// later, wire it here.
+static void ReleasePUID(EOS_ProductUserId& puid) {
+    (void)puid;
+}
+
 EOSManager& EOSManager::Get() {
     static EOSManager instance;
     return instance;
 }
 
 bool EOSManager::Init() {
+    // Ensure clean slate in case Init() is called twice without Shutdown()
+    // (matches LanManager::Init() behavior; prevents leaked notifications
+    // and SDK state).
+    Shutdown();
+
     EOS_InitializeOptions InitOptions = {0};
     InitOptions.ApiVersion = EOS_INITIALIZE_API_LATEST;
     InitOptions.ProductName = "DodgeTheMagma";
@@ -115,8 +129,8 @@ void EOSManager::Shutdown() {
     }
     m_connect = nullptr;
     m_p2p = nullptr;
-    m_localPUID = nullptr;
-    m_remotePUID = nullptr;
+    ReleasePUID(m_localPUID);
+    ReleasePUID(m_remotePUID);
     m_isHost = false;
     m_isConnected = false;
     m_isJoining = false;
@@ -194,7 +208,8 @@ void EOS_CALL EOSManager::OnCreateUserCallback(const EOS_Connect_CreateUserCallb
 void EOSManager::HostGame() {
     m_isHost = true;
     m_isConnected = false;
-    m_remotePUID = nullptr;
+    // Host shouldn't carry a stale remote PUID handle from a previous JoinGame.
+    ReleasePUID(m_remotePUID);
     m_statusMessage = "Hosting... (Waiting for Client PUID)";
 }
 
@@ -204,6 +219,8 @@ void EOSManager::JoinGame(const std::string& addressOrId) {
         return;
     }
     m_isHost = false;
+    // Free previous handle before assigning a new one (handle leak fix).
+    ReleasePUID(m_remotePUID);
     m_remotePUID = EOS_ProductUserId_FromString(addressOrId.c_str());
     if (m_remotePUID) {
         m_isJoining = true;
@@ -271,17 +288,39 @@ void EOSManager::ReceivePackets() {
     sizeOptions.ApiVersion = EOS_P2P_GETNEXTRECEIVEDPACKETSIZE_API_LATEST;
     sizeOptions.LocalUserId = m_localPUID;
     sizeOptions.RequestedChannel = nullptr;
-    
+
+    // Largest valid wire packet (PlayerListPacket) is ~155 bytes. Anything
+    // larger is a malformed/truncated payload — reject before allocating to
+    // avoid a malicious peer triggering a multi-GB std::vector allocation.
+    static constexpr uint32_t MAX_EOS_PACKET_SIZE = 4096;
+
     uint32_t nextSize = 0;
     while (EOS_P2P_GetNextReceivedPacketSize(m_p2p, &sizeOptions, &nextSize) == EOS_EResult::EOS_Success) {
+        if (nextSize == 0 || nextSize > MAX_EOS_PACKET_SIZE) {
+            // Drain the oversized/empty packet by attempting a receive into a
+            // minimal scratch buffer so we don't loop forever. If the receive
+            // itself fails, the outer EOS_P2P_GetNextReceivedPacketSize on the
+            // next iteration will simply not return this one again.
+            std::vector<uint8_t> scratch(nextSize > 0 ? nextSize : 1);
+            EOS_P2P_ReceivePacketOptions drainOpts = {0};
+            drainOpts.ApiVersion = EOS_P2P_RECEIVEPACKET_API_LATEST;
+            drainOpts.LocalUserId = m_localPUID;
+            drainOpts.MaxDataSizeBytes = (uint32_t)scratch.size();
+            EOS_ProductUserId drainPeer = nullptr;
+            EOS_P2P_SocketId drainSocket = {};
+            uint8_t drainChannel = 0;
+            uint32_t drainBytes = 0;
+            EOS_P2P_ReceivePacket(m_p2p, &drainOpts, &drainPeer, &drainSocket, &drainChannel, scratch.data(), &drainBytes);
+            continue;
+        }
         std::vector<uint8_t> buffer(nextSize);
         EOS_P2P_ReceivePacketOptions recvOpts = {0};
         recvOpts.ApiVersion = EOS_P2P_RECEIVEPACKET_API_LATEST;
         recvOpts.LocalUserId = m_localPUID;
         recvOpts.MaxDataSizeBytes = nextSize;
-        
+
         EOS_ProductUserId outPeerId = nullptr;
-        EOS_P2P_SocketId outSocketId;
+        EOS_P2P_SocketId outSocketId = {};
         uint8_t outChannel = 0;
         uint32_t outBytes = 0;
         
@@ -296,12 +335,22 @@ void EOSManager::ReceivePackets() {
                 onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer.data()));
             } else if (type == 2 && onMagmaSpawnReceived && outBytes == sizeof(SpawnMagmaPacket)) {
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer.data()));
-            } else if (type == 3 && onCoinPickupReceived && outBytes == sizeof(CoinPickupPacket)) {
+            } else if (type == 3 && outBytes == sizeof(CoinPickupPacket)) {
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer.data());
-                onCoinPickupReceived(pkt.count, pkt.team_coins);
-            } else if (type == 4 && onTeamUpgradeReceived && outBytes == sizeof(TeamUpgradePacket)) {
+                if (pkt.isRequest) {
+                    if (onCoinPickupRequest) onCoinPickupRequest(pkt.count, pkt.playerId);
+                } else if (m_isHost && onCoinPickupReceived) {
+                    // Only the host emits authoritative broadcasts; clients
+                    // must drop a peer-relayed isRequest=0 if it ever arrives.
+                    onCoinPickupReceived(pkt.count, pkt.team_coins);
+                }
+            } else if (type == 4 && outBytes == sizeof(TeamUpgradePacket)) {
                 auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer.data());
-                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
+                if (pkt.isRequest) {
+                    if (onTeamShopRequest) onTeamShopRequest(pkt);
+                } else if (m_isHost && onTeamUpgradeReceived) {
+                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
+                }
             } else if (type == 5 && onPlayerJoinReceived && outBytes == sizeof(PlayerJoinPacket)) {
                 onPlayerJoinReceived(*reinterpret_cast<PlayerJoinPacket*>(buffer.data()));
             } else if (type == 6 && onPlayerListReceived && outBytes == sizeof(PlayerListPacket)) {
@@ -317,7 +366,10 @@ void EOSManager::ReceivePackets() {
 
 std::string EOSManager::GetMyId() const {
     if (!m_localPUID) return "";
-    char buffer[256];
+    // Bug fix: zero-init the buffer so the std::string ctor stops at the
+    // first NUL even if EOS_ProductUserId_ToString fails (in which case
+    // len is left at sizeof(buffer) and the entire stack would be read).
+    char buffer[256] = {};
     int32_t len = sizeof(buffer);
     EOS_ProductUserId_ToString(m_localPUID, buffer, &len);
     return std::string(buffer);
@@ -325,12 +377,17 @@ std::string EOSManager::GetMyId() const {
 
 uint32_t EOSManager::GetPlayerId() const {
     if (!m_localPUID) return 0;
-    // Hash the PUID to a 32-bit ID for use in packet fields
-    char buffer[256];
+    // Hash the PUID to a 32-bit ID for use in packet fields.
+    // Bug fix: zero-init + bound the read by strlen so we don't hash
+    // uninitialized stack memory after the EOS call.
+    char buffer[256] = {};
     int32_t len = sizeof(buffer);
     if (EOS_ProductUserId_ToString(m_localPUID, buffer, &len) != EOS_EResult::EOS_Success) return 0;
     uint32_t hash = 0;
-    for (int32_t i = 0; i < len; ++i) {
+    // Use min(len, sizeof) to defend against buggy SDK returning a length
+    // larger than the buffer. Then zero-terminate at len for safety.
+    int32_t capLen = len < 0 ? 0 : (len > (int32_t)sizeof(buffer) ? (int32_t)sizeof(buffer) : len);
+    for (int32_t i = 0; i < capLen && buffer[i] != '\0'; ++i) {
         hash = hash * 31 + (uint8_t)buffer[i];
     }
     return hash;

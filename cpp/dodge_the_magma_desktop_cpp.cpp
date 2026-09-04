@@ -108,6 +108,15 @@ static void SaveGame() {
 static void QueueSave() { save_dirty = true; }
 
 static void LoadGame() {
+	// Bug fix: clamp values loaded from disk so a corrupted/hand-edited
+	// save.txt can't break the game (e.g. negative jump_strength, zero
+	// shield_cooldown, integer-overflow coins).
+	auto clampi = [](int& dst, int lo, int hi, int fallback) {
+		if (dst < lo || dst > hi) dst = fallback;
+	};
+	auto clampf = [](float& dst, float lo, float hi, float fallback) {
+		if (!(dst >= lo) || !(dst <= hi)) dst = fallback; // also catches NaN
+	};
 	std::ifstream f(SAVE_FILE);
 	if (!f.is_open()) { SaveGame(); return; }
 	std::string line;
@@ -117,13 +126,13 @@ static void LoadGame() {
 		std::string key = line.substr(0, pos);
 		std::string val = line.substr(pos + 1);
 		try {
-			if (key == "coins") coins = std::stoi(val);
-			else if (key == "player_speed") player_speed = std::stoi(val);
-			else if (key == "jump_strength") jump_strength = std::stoi(val);
-			else if (key == "shield_cooldown_real") shield_cooldown_real = std::stof(val);
-			else if (key == "shield_time_real") shield_time_real = std::stof(val);
-			else if (key == "magnet_level") magnet_level = std::stoi(val);
-			else if (key == "target_fps") TARGET_FPS = std::stoi(val);
+			if (key == "coins") { int tmp = std::stoi(val); clampi(tmp, 0, 1000000, 0); coins = tmp; }
+			else if (key == "player_speed") { int tmp = std::stoi(val); clampi(tmp, 1, 100, 8); player_speed = tmp; }
+			else if (key == "jump_strength") { int tmp = std::stoi(val); clampi(tmp, -100, -1, -22); jump_strength = tmp; }
+			else if (key == "shield_cooldown_real") { float tmp = std::stof(val); clampf(tmp, 1.0f, 1000.0f, 300.0f); shield_cooldown_real = tmp; }
+			else if (key == "shield_time_real") { float tmp = std::stof(val); clampf(tmp, 1.0f, 60.0f, 5.0f); shield_time_real = tmp; }
+			else if (key == "magnet_level") { int tmp = std::stoi(val); clampi(tmp, 0, 10, 0); magnet_level = tmp; }
+			else if (key == "target_fps") { int tmp = std::stoi(val); clampi(tmp, 30, 1000, 60); TARGET_FPS = tmp; }
 		} catch (...) {}
 	}
 }
@@ -342,7 +351,7 @@ struct LobbyPlayer {
 	bool isHost = false;
 };
 static std::vector<LobbyPlayer> lobby_players;
-static bool in_lobby = false;
+static LobbyPlayer my_lobby_player; // host's own LobbyPlayer entry, used by BuildLobbyPlayerListPacket
 static bool lobby_ready = false;
 static std::string my_lobby_name = "";
 
@@ -429,6 +438,11 @@ static void ResetRun() {
 	std::fill(std::begin(remote_has_shield), std::end(remote_has_shield), false);
 	std::fill(std::begin(remote_score), std::end(remote_score), 0);
 	if (is_multiplayer) team_coins = 0;
+	// Bug fix: clear sequence dedup state so a fresh run doesn't reject
+	// new packets whose sequenceId is older than the previous run's last seen.
+	seq_id = 0;
+	lastSequence.clear();
+	lastTransactionId.clear();
 	double now = NowMs();
 	next_magma_spawn = now + 300;
 	next_coin_spawn = now + 900;
@@ -654,7 +668,7 @@ static void DrawHud() {
 	if (is_multiplayer) {
 		DrawBox(10, 10, 370, 132, BLACK, C_ORANGE);
 		GText(TextFormat("SCORE: %d",             score),              22,  18, 24, C_WHITE);
-		GText(TextFormat("P2 SCORE: %d",          remote_score[0]),       22,  46, 22, C_ORANGE);
+		GText(TextFormat("P2 SCORE: %d",          remote_score[1]),       22,  46, 22, C_ORANGE);
 		GText(TextFormat("TEAM COINS: %d",         team_coins),         22,  72, 22, C_YELLOW);
 		GText(TextFormat("SPD: %d",               player_speed),       22, 106, 18, C_BLUE);
 		GText(TextFormat("JUMPS: %d/%d", jumps_left, max_jumps),      175, 106, 18, C_GREEN);
@@ -716,7 +730,7 @@ static void DrawInfoHub() {
 	if (is_multiplayer) {
 		GText(TextFormat("TEAM:  %d",  team_coins),   (float)(hubX + 16), (float)(hubY + 38), 20, C_ORANGE);
 		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 64), 18, C_WHITE);
-		GText(TextFormat("P2:    %d",  remote_score[0]),  (float)(hubX + 16), (float)(hubY + 84), 16, Color{210,140,60,255});
+		GText(TextFormat("P2:    %d",  remote_score[1]),  (float)(hubX + 16), (float)(hubY + 84), 16, Color{210,140,60,255});
 	} else {
 		GText(TextFormat("SCORE: %d",  score),         (float)(hubX + 16), (float)(hubY + 40), 20, C_WHITE);
 	}
@@ -817,22 +831,30 @@ static void DrawLobbyMenu() {
 	GText("LOBBY", (float)(WIDTH/2 - tw/2), (float)y, 38, C_GREEN);
 	y += 52;
 
-	// Player list
-	for (size_t i = 0; i < lobby_players.size(); ++i) {
-		const auto& p = lobby_players[i];
-		std::string readyStr = p.ready ? "[READY]" : "[NOT READY]";
-		Color readyColor = p.ready ? C_GREEN : C_RED;
-		std::string hostStr = p.isHost ? " (HOST)" : "";
-		std::string line = p.name + hostStr + " - " + readyStr;
-		DrawTextCentered(line.c_str(), y, (p.name == my_lobby_name) ? C_YELLOW : C_WHITE, 22);
-		y += gap - 4;
-	}
+	// Player list — host first, then joined clients (bug #57).
+    // For clients, the host's entry is part of PlayerListPacket and ends up
+    // in lobby_players via onPlayerListReceived. To keep the visual
+    // consistent on both sides, draw my_lobby_player as host (or self for
+    // client) followed by the joined clients.
+    auto drawEntry = [&](const LobbyPlayer& p) {
+        std::string readyStr = p.ready ? "[READY]" : "[NOT READY]";
+        Color readyColor = p.ready ? C_GREEN : C_RED;
+        std::string hostStr = p.isHost ? " (HOST)" : "";
+        std::string line = p.name + hostStr + " - " + readyStr;
+        DrawTextCentered(line.c_str(), y, (p.name == my_lobby_name) ? C_YELLOW : C_WHITE, 22);
+        y += gap - 4;
+    };
+    if (!my_lobby_player.name.empty()) drawEntry(my_lobby_player);
+    for (size_t i = 0; i < lobby_players.size(); ++i) {
+        if (lobby_players[i].playerId == my_lobby_player.playerId) continue; // skip dup
+        drawEntry(lobby_players[i]);
+    }
 
-	// Empty slots
-	for (size_t i = lobby_players.size(); i < 4; ++i) {
-		DrawTextCentered("[ waiting for player... ]", y, Color{100,100,100,255}, 20);
-		y += gap - 4;
-	}
+    // Empty slots
+    for (size_t i = lobby_players.size() + (my_lobby_player.name.empty() ? 0 : 1); i < 4; ++i) {
+        DrawTextCentered("[ waiting for player... ]", y, Color{100,100,100,255}, 20);
+        y += gap - 4;
+    }
 
 	DrawLine(WIDTH/2 - 220, y, WIDTH/2 + 220, y, Color{80, 50, 20, 255}); y += 18;
 
@@ -841,18 +863,24 @@ static void DrawLobbyMenu() {
 		std::string readyLabel = lobby_ready ? "[ R ] UNREADY" : "[ R ] READY";
 		Color readyColor = lobby_ready ? C_GREEN : C_ORANGE;
 		DrawTextCentered(readyLabel.c_str(), y, readyColor, 22); y += gap;
-	} else {
-		// Host sees if all ready
-		bool allReady = true;
-		for (const auto& p : lobby_players) {
-			if (!p.ready) { allReady = false; break; }
-		}
-		if (allReady && lobby_players.size() > 1) {
-			DrawTextCentered("[ SPACE ] START GAME", y, C_BLUE, 22); y += gap;
-		} else {
-			DrawTextCentered("Waiting for all players to ready...", y, Color{180,180,80,255}, 20); y += gap;
-		}
-	}
+} else {
+// Host sees if all clients are ready. The host itself has no ready
+        // toggle UI and is always implicitly ready — without this, the
+        // allReady check is stuck false forever (bug CRITICAL: host can
+        // never start a game).
+        bool allReady = true;
+        for (const auto& p : lobby_players) {
+            if (!p.ready) { allReady = false; break; }
+        }
+        // Bug #57/C4: include host in total so 1-client lobby can begin.
+        if (allReady && (lobby_players.size() + 1) > 1) {
+            DrawTextCentered("[ SPACE ] START GAME", y, C_BLUE, 22); y += gap;
+        } else if (lobby_players.empty()) {
+            DrawTextCentered("Waiting for a player to join...", y, Color{180,180,80,255}, 20); y += gap;
+        } else {
+            DrawTextCentered("Waiting for all players to ready...", y, Color{180,180,80,255}, 20); y += gap;
+        }
+    }
 
 	// Back
 	DrawTextCentered("[ ESC ] LEAVE LOBBY", HEIGHT/2 + 198, C_WHITE, 20);
@@ -1088,6 +1116,30 @@ int main() {
 	g_network = &LanManager::Get();
 	g_network->Init();
 
+	// Bug #57/C4: build a PlayerListPacket from the current lobby_players AND
+	// the host itself, so the wire shape always contains the host (which is
+	// the actual authority for "all players present + ready"). The StartGame
+	// gate elsewhere requires lobby_players.size() > 1; without including
+	// the host that gate fails for a single-client lobby.
+	static auto BuildLobbyPlayerListPacket = [](PlayerListPacket& pkt) {
+		std::vector<LobbyPlayer> all;
+		// Insert host first so slot 0 is the host (UI convention).
+		all.push_back(my_lobby_player); // host's own LobbyPlayer
+		for (const auto& p : lobby_players) {
+			if (p.playerId == my_lobby_player.playerId) continue; // skip dup host
+			all.push_back(p);
+			if (all.size() >= 4) break; // PlayerListPacket caps at 4
+		}
+		pkt.count = (uint8_t)all.size();
+		for (size_t i = 0; i < all.size(); ++i) {
+			strncpy(pkt.players[i].name, all[i].name.c_str(), 31);
+			pkt.players[i].name[31] = '\0';
+			pkt.players[i].playerId = all[i].playerId;
+			pkt.players[i].ready = all[i].ready;
+			pkt.players[i].isHost = all[i].isHost;
+		}
+	};
+
 	auto BindNetworkCallbacks = []() {
 		g_network->onPlayerStateReceived = [](const PlayerStatePacket& packet) {
 			auto it = lastSequence.find(packet.playerId);
@@ -1125,36 +1177,60 @@ int main() {
 			if (connected) {
 				is_multiplayer = true;
 				// Enter lobby when connected
-				in_lobby = true;
 				lobby_ready = false;
 				gameState = GameState::LOBBY;
 			} else {
 				is_multiplayer = false;
-				in_lobby = false;
 				lobby_players.clear();
 				gameState = GameState::MULTIPLAYER;
 			}
 		};
 
 		g_network->onCoinPickupReceived = [](int count, int32_t newTeamCoins) {
-			// Bug #46 fix: only apply team_coins if it advances local state.
-			// Out-of-order delivery (EOS ReliableUnordered, UDP on LAN) can
-			// deliver an older pickup after a newer one, which would otherwise
-			// roll the team coin pool backwards and desync the shop economy.
-			// Spending actions are not broadcast via this packet, so any drop
-			// here is purely against stale/older pickups.
-			if (newTeamCoins < team_coins) {
-				return;
-			}
+			// With host-authoritative coin state (bug #52), broadcasts only
+			// come from the host and represent the canonical team_coins total.
+			// The earlier rollback guard (bug #46) is now unnecessary and
+			// could even mask legitimate deductions (future shop sync).
+			(void)count;
 			team_coins = newTeamCoins;
 		};
+
+		// Bug #52: host-side handler for client coin pickup requests. Host is
+		// the single source of truth for team_coins — it adds the requested
+		// amount and broadcasts authoritative state to all peers. UDP
+		// packets can be duplicated/retransmitted by the network layer, so
+		// we rate-limit by (playerId, time window) to prevent a duplicate
+		// packet from inflating team_coins.
+		static std::map<uint32_t, uint64_t> lastCoinPickupMs;
+		g_network->onCoinPickupRequest = [](int count, uint32_t playerId) {
+			if (!g_network->IsHost()) return;
+			if (count <= 0) return; // ignore garbage
+			uint64_t nowMs = (uint64_t)NowMs();
+			auto it = lastCoinPickupMs.find(playerId);
+			if (it != lastCoinPickupMs.end() && nowMs - it->second < 200) {
+				// Same player tried to add coins within 200ms — assume
+				// it's a retransmit/replay and drop.
+				return;
+			}
+			lastCoinPickupMs[playerId] = nowMs;
+			int32_t newTeamCoins = team_coins + count;
+			team_coins = newTeamCoins;
+			CoinPickupPacket auth;
+			auth.type = 3;
+			auth.isRequest = 0;
+			auth.count = count;
+			auth.team_coins = newTeamCoins;
+			g_network->SendPacket(&auth, sizeof(auth));
+		};
 		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t playerId, uint32_t transactionId) {
-			// Ignore duplicate/old transactions, scoped per-player so two players
-			// buying upgrades concurrently (tx 1 from each) don't shadow each other.
+			// Per-player transaction dedup. With host-authoritative shop, the
+			// host already filtered out invalid/double-spend requests, so
+			// duplicates can only happen from host's own broadcast → client
+			// rebroadcast loops or packet replay.
 			auto it = lastTransactionId.find(playerId);
 			if (it != lastTransactionId.end() && transactionId <= it->second) return;
 			lastTransactionId[playerId] = transactionId;
-			
+
 			switch (upgradeId) {
 				case 0: player_speed = newValue; break;
 				case 1: jump_strength = newValue; break;
@@ -1163,29 +1239,99 @@ int main() {
 			}
 			QueueSave();
 		};
+
+		// Bug #53: host-side handler for client shop requests. Only the host
+		// receives these (LanManager/EOSManager only fire onTeamShopRequest
+		// on the host side). Host validates against local team_coins, applies
+		// the upgrade, and re-broadcasts an authoritative packet
+		// (isRequest=0) so all peers converge on the same state. Invalid
+		// requests (insufficient coins) are dropped silently.
+		// Bug H1: also dedup by (playerId, transactionId) so UDP retransmit
+		// or peer-relayed replay cannot double-charge the team coins.
+		g_network->onTeamShopRequest = [](const TeamUpgradePacket& req) {
+			if (!g_network->IsHost()) return;
+			auto it = lastTransactionId.find(req.playerId);
+			if (it != lastTransactionId.end() && req.transaction_id <= it->second) return;
+			int cost = 0;
+			int32_t deltaStat = 0;
+			switch (req.upgrade_id) {
+				case 0: cost = 20; deltaStat = 1; break;   // speed
+				case 1: cost = 30; deltaStat = -2; break;  // jump (lower = stronger)
+				case 2: cost = 100;                        // shield (float math in caller)
+				case 3: cost = 150; deltaStat = 1; break;  // magnet
+				default: return;
+			}
+			if (team_coins < cost) return; // bug #53: invalid, double-spend, or stale
+			team_coins -= cost;
+			int32_t newVal = 0;
+			switch (req.upgrade_id) {
+				case 0: player_speed += deltaStat; newVal = player_speed; break;
+				case 1: jump_strength += deltaStat; newVal = jump_strength; break;
+				case 2: shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
+				        newVal = (int32_t)shield_cooldown_real; break;
+				case 3: magnet_level += deltaStat; newVal = magnet_level; break;
+			}
+			QueueSave();
+			lastTransactionId[req.playerId] = req.transaction_id; // host dedup (bug H1)
+			TeamUpgradePacket auth;
+			auth.type = 4;
+			auth.upgrade_id = req.upgrade_id;
+			auth.isRequest = 0; // authoritative broadcast
+			auth.new_value = newVal;
+			auth.playerId = req.playerId; // which player bought (kept for tx dedup)
+			auth.transaction_id = req.transaction_id;
+			g_network->SendPacket(&auth, sizeof(auth));
+		};
 		
 		// Lobby callbacks
 		g_network->onPlayerJoinReceived = [](const PlayerJoinPacket& packet) {
 			// Host only: add player to lobby
 			if (g_network->IsHost()) {
+				// Bug #55: dedupe by playerId so even if the transport fires
+				// the callback twice for the same join (e.g. across a rapid
+				// retry + fresh-join race), the lobby entry list stays sane.
+				// LanManager's isFreshJoin guard already drops the retries,
+				// but a defense-in-depth check here protects against any other
+				// path that could deliver the callback twice.
+				for (const auto& existing : lobby_players) {
+					if (existing.playerId == packet.playerId) return;
+				}
 				LobbyPlayer p;
 				p.name = packet.name;
 				p.playerId = packet.playerId;
 				p.ready = false;
 				p.isHost = false;
 				lobby_players.push_back(p);
-				
-				// Send updated player list to all
+
+				// Send updated player list to all. Host also includes itself
+				// in the broadcast so clients see [host, ...clients].
 				PlayerListPacket listPkt;
-				listPkt.count = (uint8_t)lobby_players.size();
-				for (size_t i = 0; i < lobby_players.size(); ++i) {
-					strncpy(listPkt.players[i].name, lobby_players[i].name.c_str(), 31);
-					listPkt.players[i].name[31] = '\0';
-					listPkt.players[i].ready = lobby_players[i].ready;
-					listPkt.players[i].isHost = lobby_players[i].isHost;
-				}
+				BuildLobbyPlayerListPacket(listPkt);
 				g_network->SendPacket(&listPkt, sizeof(listPkt));
 			}
+		};
+
+		// Bug C2: bind onPlayerRemoved so the host's lobby_players actually
+		// shrinks when a client times out. Without this the host's lobby UI
+		// and the allReady/start-gate checks include ghost players and the
+		// host can never start a game after the first disconnect.
+		g_network->onPlayerRemoved = [](const PlayerJoinPacket& packet) {
+			if (!g_network->IsHost()) return;
+			auto it = std::find_if(lobby_players.begin(), lobby_players.end(),
+				[&](const LobbyPlayer& p) { return p.playerId == packet.playerId; });
+			if (it != lobby_players.end()) {
+				lobby_players.erase(it);
+			}
+			// Bug MEDIUM-8: drop stale dedup state for the removed player so
+			// a future client reusing the same playerId (rare but possible)
+			// isn't rejected as stale by sequence or transaction checks.
+			lastSequence.erase(packet.playerId);
+			lastTransactionId.erase(packet.playerId);
+			// Re-broadcast the player list so remaining clients see the
+			// updated roster. BuildLobbyPlayerListPacket adds the host back in.
+			PlayerListPacket listPkt;
+			BuildLobbyPlayerListPacket(listPkt);
+			g_network->SendPacket(&listPkt, sizeof(listPkt));
 		};
 		
 		g_network->onPlayerListReceived = [](const PlayerListPacket& packet) {
@@ -1197,6 +1343,13 @@ int main() {
 				p.ready = packet.players[i].ready;
 				p.isHost = packet.players[i].isHost;
 				lobby_players.push_back(p);
+				// Bug fix: keep client's local lobby_ready in sync with the
+				// authoritative ready state the host echoed back. Otherwise
+				// the local HUD can show "[READY]" while the host's lobby
+				// still shows this client as not ready (HIGH-5).
+				if (packet.players[i].playerId == g_network->GetPlayerId()) {
+					lobby_ready = packet.players[i].ready;
+				}
 			}
 			// Update my_lobby_name if not set
 			if (my_lobby_name.empty() && !lobby_players.empty()) {
@@ -1410,7 +1563,14 @@ int main() {
 			}
 			case GameState::GAMEOVER: {
 				if (tick >= gameover_input_unlock_at) {
-					if (IsKeyPressed(KEY_SPACE)) ResetRun();
+					if (IsKeyPressed(KEY_SPACE)) {
+						// Bug fix: reset session dedup so a rematch in the same
+						// lobby produces a StartGamePacket that the client will
+						// actually accept (expectedSessionId is otherwise stuck
+						// on the previous game's sessionId).
+						expectedSessionId = 0;
+						ResetRun();
+					}
 					if (IsKeyPressed(KEY_M)) gameState = GameState::MENU;
 					if (IsKeyPressed(KEY_S)) gameState = GameState::SHOP;
 					if (IsKeyPressed(KEY_Q)) { SaveGame(); CloseWindow(); return 0; }
@@ -1440,23 +1600,49 @@ int main() {
 					if (IsKeyPressed(KEY_T)) gameState = GameState::TEAM_SHOP;
 					if (IsKeyPressed(KEY_SPACE)) {
 						gameState = GameState::LOBBY;
-						in_lobby = true;
 						lobby_ready = false;
 					}
 				}
-				if (IsKeyPressed(KEY_C)) {
-					if (g_network == &LanManager::Get()) {
-						g_network = &EOSManager::Get();
-						g_network->Init();
-						BindNetworkCallbacks();
-					} else {
-						g_network = &LanManager::Get();
-						g_network->Init();
-						BindNetworkCallbacks();
-					}
-				}
+if (IsKeyPressed(KEY_C)) {
+                    // Reset all per-network dedup state so the fresh transport
+                    // doesn't see stale IDs from the previous one (bug H3).
+                    seq_id = 0;
+                    lastSequence.clear();
+                    lastTransactionId.clear();
+                    expectedSessionId = 0;
+                    // Reset host/lobby state to a clean slate — the previous
+                    // network's IDs/connections shouldn't carry over visually.
+                    lobby_players.clear();
+                    my_lobby_player = LobbyPlayer();
+                    my_lobby_name = "";
+                    lobby_ready = false;
+                    team_coins = 0;
+                    is_multiplayer = false;
+                    gameState = GameState::MULTIPLAYER;
+                    NetworkProvider* oldNetwork = g_network;
+                    if (g_network == &LanManager::Get()) {
+                        g_network = &EOSManager::Get();
+                    } else {
+                        g_network = &LanManager::Get();
+                    }
+                    // Bug fix: shut down the old provider first so its
+                    // sockets / notifications / WSA refcount decrement
+                    // before we init the new one (was leaking sockets).
+                    oldNetwork->Shutdown();
+                    g_network->Init();
+                    BindNetworkCallbacks();
+                }
 				if (IsKeyPressed(KEY_H)) {
 					g_network->HostGame();
+					// Populate my_lobby_player so the lobby list reflects the
+					// host itself (bug #57/C4). Without this, the host never
+					// appears in its own lobby and the StartGame gate fails.
+					my_lobby_player.name = my_lobby_name.empty()
+						? std::string("Player_") + std::to_string(g_network->GetPlayerId())
+						: my_lobby_name;
+					my_lobby_player.playerId = g_network->GetPlayerId();
+					my_lobby_player.ready = false;
+					my_lobby_player.isHost = true;
 				}
 				{
 					if (IsKeyPressed(KEY_J)) {
@@ -1505,12 +1691,17 @@ login_status = g_network->GetStatus();
 					for (const auto& p : lobby_players) {
 						if (!p.ready) { allReady = false; break; }
 					}
-					if (allReady && lobby_players.size() > 1) {
-						StartGamePacket startPkt;
-						startPkt.sessionId = ++g_session_id;
-						g_network->SendPacket(&startPkt, sizeof(startPkt));
-						ResetRun();
-					}
+if (allReady) {
+                    // Bug #57/C4: the host itself must be counted, otherwise
+                    // with a single client the size is 1 and StartGame never fires.
+                    const size_t totalPlayers = lobby_players.size() + 1; // +1 for host
+                    if (totalPlayers > 1) {
+                        StartGamePacket startPkt;
+                        startPkt.sessionId = ++g_session_id;
+                        g_network->SendPacket(&startPkt, sizeof(startPkt));
+                        ResetRun();
+                    }
+                }
 				}
 			} else {
 // Client can toggle ready
@@ -1524,12 +1715,17 @@ login_status = g_network->GetStatus();
 			}
 			if (IsKeyPressed(KEY_ESCAPE)) {
 				// Leave lobby
-				in_lobby = false;
 				lobby_players.clear();
 				lobby_ready = false;
 				my_lobby_name = "";
+				my_lobby_player = LobbyPlayer(); // bug #57: reset host's own entry
 				team_upgrade_tx_id = 0;
 				lastTransactionId.clear();
+				lastSequence.clear();
+				seq_id = 0;
+				expectedSessionId = 0; // bug C1: allow restarts to compare against a fresh session
+				team_coins = 0;        // bug HIGH-2: drop stale team coins before going back to MENU
+				is_multiplayer = false; // bug HIGH-2: explicitly exit multiplayer so MENU/SHOP paths don't see stale flag
 				// Disconnect from network
 				g_network->Shutdown();
 				g_network->Init();
@@ -1539,33 +1735,54 @@ login_status = g_network->GetStatus();
 			break;
 		}
 case GameState::TEAM_SHOP: {
+			// Bug #53/#54 fix: shop economy is host-authoritative. The host
+			// applies the purchase locally and broadcasts authoritative state
+			// (isRequest=0). Clients only send purchase requests (isRequest=1)
+			// and apply state from the host's broadcast, eliminating
+			// double-spend races and conflicting new_value writes.
 			auto buyTeam = [](uint8_t id, int cost, int32_t& stat, int delta) {
-				if (team_coins >= cost) {
-					team_coins -= cost;
-					stat += delta;
-					QueueSave();
-					TeamUpgradePacket pkt;
-					pkt.type = 4;
-					pkt.upgrade_id = id;
-					pkt.new_value = stat;
-					pkt.playerId = g_network->GetPlayerId();
-					pkt.transaction_id = ++team_upgrade_tx_id;
-					g_network->SendPacket(&pkt, sizeof(pkt));
+				TeamUpgradePacket pkt;
+				pkt.type = 4;
+				pkt.upgrade_id = id;
+				pkt.playerId = g_network->GetPlayerId();
+				pkt.transaction_id = ++team_upgrade_tx_id;
+				if (g_network->IsHost()) {
+					if (team_coins >= cost) {
+						team_coins -= cost;
+						stat += delta;
+						QueueSave();
+						pkt.isRequest = 0;
+						pkt.new_value = stat;
+						g_network->SendPacket(&pkt, sizeof(pkt));
+					}
+				} else {
+					if (team_coins >= cost) {
+						pkt.isRequest = 1;
+						pkt.new_value = 0; // unused on request
+						g_network->SendPacket(&pkt, sizeof(pkt));
+					}
 				}
 			};
 			if (IsKeyPressed(KEY_ONE)   && team_coins >= 20) { buyTeam(0, 20, player_speed, 1); }
 			if (IsKeyPressed(KEY_TWO)   && team_coins >= 30) { buyTeam(1, 30, jump_strength, -2); }
 			if (IsKeyPressed(KEY_THREE) && team_coins >= 100) {
-				team_coins -= 100;
-				shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
-				QueueSave();
 				TeamUpgradePacket pkt;
 				pkt.type = 4;
 				pkt.upgrade_id = 2;
-				pkt.new_value = (int32_t)shield_cooldown_real;
 				pkt.playerId = g_network->GetPlayerId();
 				pkt.transaction_id = ++team_upgrade_tx_id;
-				g_network->SendPacket(&pkt, sizeof(pkt));
+				if (g_network->IsHost()) {
+					team_coins -= 100;
+					shield_cooldown_real = std::max(120.0f, shield_cooldown_real - 10);
+					QueueSave();
+					pkt.isRequest = 0;
+					pkt.new_value = (int32_t)shield_cooldown_real;
+					g_network->SendPacket(&pkt, sizeof(pkt));
+				} else if (team_coins >= 100) {
+					pkt.isRequest = 1;
+					pkt.new_value = 0;
+					g_network->SendPacket(&pkt, sizeof(pkt));
+				}
 			}
 			if (IsKeyPressed(KEY_FOUR)  && team_coins >= 150) { buyTeam(3, 150, magnet_level, 1); }
 			if (IsKeyPressed(KEY_ESCAPE)) gameState = GameState::MULTIPLAYER;
@@ -1677,7 +1894,10 @@ case GameState::TEAM_SHOP: {
 // Send player state if multiplayer
 			if (is_multiplayer) {
 				PlayerStatePacket packet;
-				packet.protocolVersion = 1;
+				// Bug fix: use CURRENT_PROTOCOL_VERSION constant. A hard-coded 1
+				// here was silently breaking every PlayerStatePacket — peers
+				// reject mismatched versions and remote players froze.
+				packet.protocolVersion = CURRENT_PROTOCOL_VERSION;
 				packet.sequenceId = seq_id++;
 				packet.x = player.x;
 				packet.y = player.y;
@@ -1744,16 +1964,28 @@ case GameState::TEAM_SHOP: {
 					else if (c.y > HEIGHT) continue;
 					else nextCoins.push_back(c);
 				}
-if (collected) { 
+if (collected) {
     if (is_multiplayer) {
-        int32_t newTeamCoins = team_coins + collected;
-        if (g_network->onCoinPickupReceived) {
-            g_network->onCoinPickupReceived(collected, newTeamCoins);
-        }
         CoinPickupPacket pkt;
         pkt.type = 3;
         pkt.count = collected;
-        pkt.team_coins = newTeamCoins;
+        if (g_network->IsHost()) {
+            // Bug #52: host is authoritative — apply locally and broadcast
+            // the new total. Eliminates lost-update races where two clients
+            // both compute from a stale shared total.
+            int32_t newTeamCoins = team_coins + collected;
+            team_coins = newTeamCoins;
+            pkt.isRequest = 0;
+            pkt.team_coins = newTeamCoins;
+            if (g_network->onCoinPickupReceived) {
+                g_network->onCoinPickupReceived(collected, newTeamCoins);
+            }
+        } else {
+            // Client only requests; host applies and broadcasts authoritative.
+            pkt.isRequest = 1;
+            pkt.team_coins = 0; // unused on request
+            pkt.playerId = g_network->GetPlayerId();
+        }
         g_network->SendPacket(&pkt, sizeof(pkt));
     } else {
         coins += collected; 
@@ -1782,18 +2014,19 @@ if (collected) {
 			for (auto& m : magma_list) DrawMagma(m);
 			for (auto& c : coin_list)  DrawCoin(c, tick);
 			
-			// Draw remote player
-if (is_multiplayer && remote_player_x[0] != -1000) {
-			Rectangle rp = {remote_player_x[0], remote_player_y[0], (float)PLAYER_SIZE, (float)PLAYER_SIZE};
-				DrawRectangleRounded(rp, 0.2f, 16, Fade(C_ORANGE, 0.7f));
-				DrawRectangleRoundedLines(rp, 0.2f, 16, C_WHITE);
-				
-if (remote_has_shield[0]) {
-			Vector2 remoteCenter = { rp.x + rp.width/2, rp.y + rp.height/2 };
-					int pulse = 28 + (int)((std::sin(tick * 0.03) + 1) * 2);
-					DrawGlowCircle(remoteCenter, (float)pulse, C_GREEN, 75);
-					DrawCircleLines(remoteCenter.x, remoteCenter.y, pulse, C_GREEN);
-				}
+			// Draw remote player (first peer = slot 1, since slot 0 is the host's
+            // own playerId and is already drawn as the local player).
+            if (is_multiplayer && remote_player_x[1] != -1000) {
+                Rectangle rp = {remote_player_x[1], remote_player_y[1], (float)PLAYER_SIZE, (float)PLAYER_SIZE};
+                DrawRectangleRounded(rp, 0.2f, 16, Fade(C_ORANGE, 0.7f));
+                DrawRectangleRoundedLines(rp, 0.2f, 16, C_WHITE);
+
+                if (remote_has_shield[1]) {
+                    Vector2 remoteCenter = { rp.x + rp.width/2, rp.y + rp.height/2 };
+                    int pulse = 28 + (int)((std::sin(tick * 0.03) + 1) * 2);
+                    DrawGlowCircle(remoteCenter, (float)pulse, C_GREEN, 75);
+                    DrawCircleLines(remoteCenter.x, remoteCenter.y, pulse, C_GREEN);
+                }
 			}
 
 			DrawPlayer();
