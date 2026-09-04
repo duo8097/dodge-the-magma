@@ -16,6 +16,11 @@
 //  9 = KeepAlivePacket   (client sends periodically to host)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Bump this whenever a packet struct's wire layout changes. Receivers reject
+// packets whose protocolVersion != CURRENT_PROTOCOL_VERSION to avoid silent
+// corruption when two clients run different builds.
+static constexpr uint8_t CURRENT_PROTOCOL_VERSION = 1;
+
 #pragma pack(push, 1)
 
 struct PlayerStatePacket {
@@ -53,6 +58,7 @@ struct TeamUpgradePacket {
     uint8_t  protocolVersion = 1;
     uint8_t  upgrade_id; // 0=speed  1=jump  2=shield  3=magnet
     int32_t  new_value;  // stat value after upgrade (applied on receiver side)
+    uint32_t playerId;   // sender's playerId so receivers can dedupe per-sender
     uint32_t transaction_id; // Transaction ID for idempotent purchases
 };
 
@@ -120,7 +126,7 @@ public:
     std::function<void(const SpawnMagmaPacket&)>     onMagmaSpawnReceived;
     std::function<void(bool)>                        onConnectionEstablished;
     std::function<void(int /*count*/, int32_t /*teamCoins*/)>               onCoinPickupReceived;    // team coin sync
-    std::function<void(uint8_t /*id*/, int32_t, uint32_t)>     onTeamUpgradeReceived;  // team shop sync
+    std::function<void(uint8_t /*id*/, int32_t, uint32_t /*playerId*/, uint32_t /*txId*/)>  onTeamUpgradeReceived;  // team shop sync
     std::function<void(const PlayerJoinPacket&)>     onPlayerJoinReceived;
     std::function<void(const PlayerJoinPacket&)>     onPlayerRemoved;        // player left lobby
     std::function<void(const PlayerListPacket&)>     onPlayerListReceived;

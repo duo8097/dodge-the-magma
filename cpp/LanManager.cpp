@@ -60,6 +60,14 @@ static bool AddrEqual(const sockaddr_in& a, const sockaddr_in& b) {
     return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
 
+static bool ProtocolVersionOK(const char* buf, int bytes) {
+    // Skip packets that don't carry a protocolVersion byte (type 5/6/7/9)
+    // by relying on caller to check type first. Caller must validate type and
+    // size before invoking this.
+    if (bytes < 2) return false;
+    return static_cast<uint8_t>(buf[1]) == CURRENT_PROTOCOL_VERSION;
+}
+
 void LanManager::GeneratePlayerId(uint32_t mixSalt) {
     // Per-instance identity. mixSalt lets callers (HostGame/JoinGame) refresh
     // the ID with extra entropy while Init() passes 0 to stay deterministic
@@ -196,8 +204,11 @@ void LanManager::HostGame() {
     m_players.clear();
 
     GeneratePlayerId(0);
-    std::string myName = "Player_" + std::to_string(m_myPlayerId);
-    AddPlayer(m_myPlayerId, myName.c_str(), true); // Add host as first player
+    // Regenerate name to match the new ID. Without this, a fresh HostGame()
+    // call after a previous JoinGame (or vice versa) could broadcast a name
+    // that doesn't correspond to m_myPlayerId, breaking lobby identity.
+    m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
+    AddPlayer(m_myPlayerId, m_myPlayerName.c_str(), true); // Add host as first player
     
     if (m_serverSocket != INVALID_SOCKET_VAL) {
         CLOSE_SOCKET((socket_t)m_serverSocket);
@@ -259,9 +270,10 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_isJoining = true;
     m_lastJoinAttemptTime = GetTimeMs(); // Initialize join attempt timer
     m_lastPingTime = GetTimeMs();
-    if (m_myPlayerName.empty()) {
-        m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
-    }
+    // Always regenerate name from the current ID. Init() pre-populates
+    // m_myPlayerName, so the previous "only-if-empty" check could leave a
+    // stale name that no longer matches m_myPlayerId after GeneratePlayerId().
+    m_myPlayerName = "Player_" + std::to_string(m_myPlayerId);
 
 }
 
@@ -367,6 +379,7 @@ void LanManager::ReceiveData() {
         m_players[idx].lastSeen = now; // Update last seen time for the known player
         
         if (type == 1 && onPlayerStateReceived && r == sizeof(PlayerStatePacket)) {
+                    if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<PlayerStatePacket*>(buffer);
                     // Validate playerId matches the sender's registered player
                     if (pkt.playerId != m_players[idx].playerId) {
@@ -375,11 +388,18 @@ void LanManager::ReceiveData() {
                     }
                     onPlayerStateReceived(pkt);
                 } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
+                    if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
                     onCoinPickupReceived(pkt.count, pkt.team_coins);
-                } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
+} else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
+                    if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
-                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
+                    // Tag the packet with the sender's authoritative playerId so
+                    // the receiver can dedupe transactions per-player. If the
+                    // packet's playerId is missing/malicious we override with
+                    // the sender we already authenticated by address.
+                    pkt.playerId = m_players[idx].playerId;
+                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
             } else if (type == 7 && onReadyStatusReceived && r == sizeof(ReadyStatusPacket)) {
                 auto& pkt = *reinterpret_cast<ReadyStatusPacket*>(buffer);
                 // Find player by ID, not name
@@ -414,15 +434,20 @@ void LanManager::ReceiveData() {
             m_lastPingTime = now;
             
             if (type == 1 && onPlayerStateReceived && r == sizeof(PlayerStatePacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer));
             } else if (type == 2 && onMagmaSpawnReceived && r == sizeof(SpawnMagmaPacket)) {
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer));
             } else if (type == 3 && onCoinPickupReceived && r == sizeof(CoinPickupPacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<CoinPickupPacket*>(buffer);
                 onCoinPickupReceived(pkt.count, pkt.team_coins);
             } else if (type == 4 && onTeamUpgradeReceived && r == sizeof(TeamUpgradePacket)) {
+                    if (!ProtocolVersionOK(buffer, r)) continue;
                     auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer);
-                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
+                    // Trust host's playerId tag (host has already authoritative
+                    // sender mapping), so transaction dedup is correct per-player.
+                    onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
             } else if (type == 6 && onPlayerListReceived && r == sizeof(PlayerListPacket)) {
                 auto& pkt = *reinterpret_cast<PlayerListPacket*>(buffer);
                 if (pkt.count <= 4) {
@@ -445,6 +470,7 @@ void LanManager::ReceiveData() {
                     onPlayerListReceived(pkt);
                 }
             } else if (type == 8 && onStartGameReceived && r == sizeof(StartGamePacket)) {
+                if (!ProtocolVersionOK(buffer, r)) continue;
                 onStartGameReceived(*reinterpret_cast<StartGamePacket*>(buffer));
             }
         }

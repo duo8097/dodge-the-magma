@@ -42,7 +42,7 @@ static const int   AUTO_SAVE_INTERVAL  = 5000; // ms
 static uint32_t g_session_id = 0;
 static uint32_t seq_id = 0;
 static std::map<uint32_t, uint32_t> lastSequence;
-static uint32_t lastTransactionId = 0;
+static std::map<uint32_t, uint32_t> lastTransactionId;
 
 // mutable settings (loaded from save)
 static int   TARGET_FPS  = DEFAULT_TARGET_FPS;
@@ -1139,10 +1139,12 @@ int main() {
 		g_network->onCoinPickupReceived = [](int count, int32_t newTeamCoins) {
 			team_coins = newTeamCoins;
 		};
-		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t transactionId) {
-			// Ignore duplicate/old transactions
-			if (transactionId <= lastTransactionId) return;
-			lastTransactionId = transactionId;
+		g_network->onTeamUpgradeReceived = [](uint8_t upgradeId, int32_t newValue, uint32_t playerId, uint32_t transactionId) {
+			// Ignore duplicate/old transactions, scoped per-player so two players
+			// buying upgrades concurrently (tx 1 from each) don't shadow each other.
+			auto it = lastTransactionId.find(playerId);
+			if (it != lastTransactionId.end() && transactionId <= it->second) return;
+			lastTransactionId[playerId] = transactionId;
 			
 			switch (upgradeId) {
 				case 0: player_speed = newValue; break;
@@ -1518,7 +1520,7 @@ login_status = g_network->GetStatus();
 				lobby_ready = false;
 				my_lobby_name = "";
 				team_upgrade_tx_id = 0;
-				lastTransactionId = 0;
+				lastTransactionId.clear();
 				// Disconnect from network
 				g_network->Shutdown();
 				g_network->Init();
@@ -1537,6 +1539,7 @@ case GameState::TEAM_SHOP: {
 					pkt.type = 4;
 					pkt.upgrade_id = id;
 					pkt.new_value = stat;
+					pkt.playerId = g_network->GetPlayerId();
 					pkt.transaction_id = ++team_upgrade_tx_id;
 					g_network->SendPacket(&pkt, sizeof(pkt));
 				}
@@ -1551,6 +1554,7 @@ case GameState::TEAM_SHOP: {
 				pkt.type = 4;
 				pkt.upgrade_id = 2;
 				pkt.new_value = (int32_t)shield_cooldown_real;
+				pkt.playerId = g_network->GetPlayerId();
 				pkt.transaction_id = ++team_upgrade_tx_id;
 				g_network->SendPacket(&pkt, sizeof(pkt));
 			}

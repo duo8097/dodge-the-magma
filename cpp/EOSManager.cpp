@@ -277,6 +277,11 @@ void EOSManager::ReceivePackets() {
         
         if (EOS_P2P_ReceivePacket(m_p2p, &recvOpts, &outPeerId, &outSocketId, &outChannel, buffer.data(), &outBytes) == EOS_EResult::EOS_Success && outBytes > 0) {
             uint8_t type = buffer[0];
+            if (outBytes >= 2 && buffer[1] != CURRENT_PROTOCOL_VERSION
+                && (type == 1 || type == 3 || type == 4 || type == 8)) {
+                // versioned packet from a mismatched build — drop silently
+                continue;
+            }
             if (type == 1 && onPlayerStateReceived && outBytes == sizeof(PlayerStatePacket)) {
                 onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer.data()));
             } else if (type == 2 && onMagmaSpawnReceived && outBytes == sizeof(SpawnMagmaPacket)) {
@@ -286,7 +291,7 @@ void EOSManager::ReceivePackets() {
                 onCoinPickupReceived(pkt.count, pkt.team_coins);
             } else if (type == 4 && onTeamUpgradeReceived && outBytes == sizeof(TeamUpgradePacket)) {
                 auto& pkt = *reinterpret_cast<TeamUpgradePacket*>(buffer.data());
-                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.transaction_id);
+                onTeamUpgradeReceived(pkt.upgrade_id, pkt.new_value, pkt.playerId, pkt.transaction_id);
             } else if (type == 5 && onPlayerJoinReceived && outBytes == sizeof(PlayerJoinPacket)) {
                 onPlayerJoinReceived(*reinterpret_cast<PlayerJoinPacket*>(buffer.data()));
             } else if (type == 6 && onPlayerListReceived && outBytes == sizeof(PlayerListPacket)) {

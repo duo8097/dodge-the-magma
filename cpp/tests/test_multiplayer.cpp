@@ -134,7 +134,7 @@ static void Packet_TeamUpgrade_transaction_id_unique() {
     TeamUpgradePacket a; a.type = 4; a.upgrade_id = 2; a.new_value = 3; a.transaction_id = 1001;
     TeamUpgradePacket b; b.type = 4; b.upgrade_id = 2; b.new_value = 3; b.transaction_id = 1002;
     CHECK(a.transaction_id != b.transaction_id);
-    CHECK(sizeof(TeamUpgradePacket) == 1 + 1 + 1 + 4 + 4);
+    CHECK(sizeof(TeamUpgradePacket) == 1 + 1 + 1 + 4 + 4 + 4);
 }
 
 static void Packet_PlayerList_capacity() {
@@ -223,7 +223,7 @@ struct MockPeer : public NetworkProvider {
         } else if (type == 4 && inbox.size() >= sizeof(TeamUpgradePacket)) {
             TeamUpgradePacket p;
             std::memcpy(&p, inbox.data(), sizeof(p));
-            if (onTeamUpgradeReceived) onTeamUpgradeReceived(p.upgrade_id, p.new_value, p.transaction_id);
+            if (onTeamUpgradeReceived) onTeamUpgradeReceived(p.upgrade_id, p.new_value, p.playerId, p.transaction_id);
             ++recv_upgradeEvents;
             recv_upgradeIdsLog.push_back(p.upgrade_id);
             consumed = sizeof(TeamUpgradePacket);
@@ -282,8 +282,8 @@ static void Mock_TeamUpgrade_applies_to_both_sides() {
     uint8_t peerShield = 0;
     uint32_t txCounter = 1000;
 
-    buyer.onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t) { /*buyer already applied*/ };
-    receiver.onTeamUpgradeReceived = [&](uint8_t id, int32_t newValue, uint32_t) {
+    buyer.onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t, uint32_t) { /*buyer already applied*/ };
+    receiver.onTeamUpgradeReceived = [&](uint8_t id, int32_t newValue, uint32_t, uint32_t) {
         // id==2 is "shield" per TeamUpgradePacket comment in NetworkProvider.h
         if (id == 2) peerShield = (uint8_t)newValue;
     };
@@ -537,7 +537,7 @@ static void Lan_Host_receives_team_upgrade_and_forwards() {
 
     std::atomic<int> upEvents{0};
     int32_t lastNewValue = -1;
-    host.onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t newValue, uint32_t) {
+    host.onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t newValue, uint32_t, uint32_t) {
         upEvents.fetch_add(1);
         lastNewValue = newValue;
     };
@@ -795,7 +795,7 @@ static void Dual_PacketSpam_dedup_transactions() {
     std::atomic<int> upEvents{0};
     int32_t lastValue = -1;
     std::vector<uint32_t> seenTxIds;
-    s.host->onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t nv, uint32_t tx) {
+    s.host->onTeamUpgradeReceived = [&](uint8_t /*id*/, int32_t nv, uint32_t, uint32_t tx) {
         upEvents.fetch_add(1);
         lastValue = nv;
         seenTxIds.push_back(tx);
@@ -989,7 +989,7 @@ static void Dual_Burst_then_immediate_disconnect() {
     s.startTicking();
 
     std::atomic<int> ups{0};
-    s.host->onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t) { ups.fetch_add(1); };
+    s.host->onTeamUpgradeReceived = [&](uint8_t, int32_t, uint32_t, uint32_t) { ups.fetch_add(1); };
 
     bool ok = s.waitUntil(std::chrono::seconds(5), [&] {
         return s.client->IsConnected() || s.host->GetPlayerCount() >= 2;
