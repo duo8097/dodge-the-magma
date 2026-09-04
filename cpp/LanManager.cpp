@@ -173,18 +173,21 @@ void LanManager::Tick() {
                 SendPlayerList();
             }
         } else {
-            // Client checks host timeout
-            if (now - m_lastPingTime > 4000) {
+            // Client checks host timeout using a clean "last packet from host"
+            // timestamp, not the keep-alive send timer (bug #51).
+            if (now - m_lastHostPacketTime > 4000) {
                 std::cout << "Host timed out." << std::endl;
                 Shutdown();
                 m_statusMessage = "Disconnected (Timeout)";
                 if (onConnectionEstablished) onConnectionEstablished(false);
             }
             // --- Bug #3 Fix: Send KeepAlivePacket periodically from client ---
-            else if (now - m_lastPingTime > 1000) { // Send keep-alive every 1 second
+            else if (now - m_lastKeepAliveSendTime > 1000) { // Send keep-alive every 1 second
                 KeepAlivePacket alivePkt;
+                alivePkt.type = 9;
+                alivePkt.protocolVersion = CURRENT_PROTOCOL_VERSION;
                 SendPacket(&alivePkt, sizeof(alivePkt));
-                m_lastPingTime = now; // Reset timer after sending
+                m_lastKeepAliveSendTime = now; // Reset timer after sending
             }
             // --- End Bug #3 Fix ---
         }
@@ -278,7 +281,10 @@ void LanManager::JoinGame(const std::string& addressOrId) {
     m_clientSocket = (size_t)sock;
     m_isJoining = true;
     m_lastJoinAttemptTime = GetTimeMs(); // Initialize join attempt timer
-    m_lastPingTime = GetTimeMs();
+    // Bug #51: seed both timers; host-packet timer also resets on first join
+    // attempt so the host has ~4s to respond before we time out.
+    m_lastHostPacketTime = GetTimeMs();
+    m_lastKeepAliveSendTime = GetTimeMs();
     // Always regenerate name from the current ID. Init() pre-populates
     // m_myPlayerName, so the previous "only-if-empty" check could leave a
     // stale name that no longer matches m_myPlayerId after GeneratePlayerId().
@@ -343,6 +349,7 @@ void LanManager::ReceiveData() {
                 // playerId in the wire packet. First, see if this exact
                 // address already has a slot (the legitimate reconnect case).
                 int idx = FindPlayerByAddress(senderAddr);
+                bool isFreshJoin = false;
                 if (idx != -1) {
                     // Legitimate reconnect from the same peer. Trust the
                     // existing playerId — do NOT overwrite it from the wire,
@@ -373,27 +380,31 @@ void LanManager::ReceiveData() {
                         std::cout << "Player joined: " << joinPkt->name
                                   << " ID: " << joinPkt->playerId << std::endl;
                         idx = (int)m_players.size() - 1;
+                        isFreshJoin = true; // Bug #47: only fire callback for fresh joins
                         m_isConnected = true; // Now connected to at least one client
                         if (onConnectionEstablished) onConnectionEstablished(true);
                     } else {
                         continue; // lobby full
                     }
                 }
-                // --- Bug #1 Fix: Call onPlayerJoinReceived for the host ---
-                PlayerJoinPacket joinPktForCallback;
-                // Always emit the authoritative playerId (from the slot we
-                // matched/created), not the raw wire value, so downstream
-                // consumers see a consistent identity.
-                joinPktForCallback.playerId = m_players[idx].playerId;
-                strncpy(joinPktForCallback.name, m_players[idx].name, 31);
-                joinPktForCallback.name[31] = '\0';
-                if (onPlayerJoinReceived) {
-                    onPlayerJoinReceived(joinPktForCallback);
+                // Bug #47 fix: clients retry Join every ~500ms, so without this
+                // guard the host would fire onPlayerJoinReceived + SendPlayerList
+                // on every retry — spamming callbacks, resetting UI state, and
+                // racing with ready toggles.
+                if (isFreshJoin) {
+                    PlayerJoinPacket joinPktForCallback;
+                    // Always emit the authoritative playerId (from the slot we
+                    // created), not the raw wire value.
+                    joinPktForCallback.playerId = m_players[idx].playerId;
+                    strncpy(joinPktForCallback.name, m_players[idx].name, 31);
+                    joinPktForCallback.name[31] = '\0';
+                    if (onPlayerJoinReceived) {
+                        onPlayerJoinReceived(joinPktForCallback);
+                    }
+                    m_statusMessage = "Client Connected (UDP)!";
+                    SendPlayerList();
                 }
-                // --- End Bug #1 Fix ---
-
-                m_statusMessage = "Client Connected (UDP)!";
-                SendPlayerList();
+                // --- End Bug #1 / #47 Fix ---
 
             } else {
                 // Other packets must come from a registered client
@@ -469,12 +480,19 @@ void LanManager::ReceiveData() {
         } else {
             // Client handles packets, verify sender is the host
             if (!AddrEqual(senderAddr, m_hostAddress)) continue;
-            
-            m_lastPingTime = now;
+
+            // Bug #51: track host packets separately from the keep-alive
+            // send timer so idle lobby doesn't false-timeout.
+            m_lastHostPacketTime = now;
             
             if (type == 1 && onPlayerStateReceived && r == sizeof(PlayerStatePacket)) {
                 if (!ProtocolVersionOK(buffer, r)) continue;
-                onPlayerStateReceived(*reinterpret_cast<PlayerStatePacket*>(buffer));
+                // Bug #50: validate the claimed playerId is one the host has
+                // registered. Rejects stale state broadcasts about players we
+                // never learned about (e.g. player timed out, host replayed).
+                auto& statePkt = *reinterpret_cast<PlayerStatePacket*>(buffer);
+                if (FindPlayerById(statePkt.playerId) == -1) continue;
+                onPlayerStateReceived(statePkt);
             } else if (type == 2 && onMagmaSpawnReceived && r == sizeof(SpawnMagmaPacket)) {
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 onMagmaSpawnReceived(*reinterpret_cast<SpawnMagmaPacket*>(buffer));
@@ -492,6 +510,27 @@ void LanManager::ReceiveData() {
                 if (!ProtocolVersionOK(buffer, r)) continue;
                 auto& pkt = *reinterpret_cast<PlayerListPacket*>(buffer);
                 if (pkt.count <= 4) {
+                    // Bug #49: validate lobby state shape before adopting it.
+                    // Reject packets with no host, multiple hosts, duplicate
+                    // IDs, or any zero playerId — these would desync lobby UI
+                    // even though the packet passed size + version checks.
+                    bool hasHost = false;
+                    bool validShape = true;
+                    for (uint8_t i = 0; i < pkt.count && validShape; ++i) {
+                        const auto& pi = pkt.players[i];
+                        if (pi.playerId == 0) { validShape = false; break; }
+                        if (pi.isHost) {
+                            if (hasHost) { validShape = false; break; }
+                            hasHost = true;
+                        }
+                        for (uint8_t j = i + 1; j < pkt.count; ++j) {
+                            if (pi.playerId == pkt.players[j].playerId) {
+                                validShape = false; break;
+                            }
+                        }
+                    }
+                    if (!validShape || !hasHost) continue;
+
                     m_players.clear();
                     for (uint8_t i = 0; i < pkt.count; ++i) {
                         ConnectedPlayer p;

@@ -71,7 +71,8 @@ private:
     bool m_wsaInitialized = false;
     void GeneratePlayerId(uint32_t mixSalt);
     uint64_t m_lastJoinAttemptTime = 0;
-    uint64_t m_lastPingTime = 0;
+    uint64_t m_lastKeepAliveSendTime = 0; // Bug #51: separate from host-packet timestamp
+    uint64_t m_lastHostPacketTime = 0;    // Bug #51: clean "last time we heard from host"
     sockaddr_in m_hostAddress;
     
     void ReceiveData();
