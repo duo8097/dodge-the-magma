@@ -17,7 +17,6 @@
 #include <cctype>
 #include <cstring>
 
-#include "EOSManager.h"
 #include "LanManager.h"
 
 NetworkProvider* g_network = nullptr;
@@ -762,9 +761,8 @@ static void DrawMultiplayerMenu() {
 	GText("MULTIPLAYER", (float)(WIDTH/2 - tw/2), (float)y, 38, C_ORANGE);
 	y += 52;
 
-	// Network mode toggle
-	std::string netLabel = (g_network == &LanManager::Get()) ? "LAN  (IP)" : "Online (EOS)";
-	DrawTextCentered(TextFormat("[ C ] MODE: %s", netLabel.c_str()), y, C_YELLOW, 20); y += gap;
+	// Network mode label (EOS mode temporarily disabled)
+	DrawTextCentered("[ MODE: LAN (IP) ]", y, C_YELLOW, 20); y += gap;
 
 	// Divider
 	DrawLine(WIDTH/2 - 220, y + 6, WIDTH/2 + 220, y + 6, Color{80, 50, 20, 255}); y += 20;
@@ -1603,35 +1601,7 @@ int main() {
 						lobby_ready = false;
 					}
 				}
-if (IsKeyPressed(KEY_C)) {
-                    // Reset all per-network dedup state so the fresh transport
-                    // doesn't see stale IDs from the previous one (bug H3).
-                    seq_id = 0;
-                    lastSequence.clear();
-                    lastTransactionId.clear();
-                    expectedSessionId = 0;
-                    // Reset host/lobby state to a clean slate — the previous
-                    // network's IDs/connections shouldn't carry over visually.
-                    lobby_players.clear();
-                    my_lobby_player = LobbyPlayer();
-                    my_lobby_name = "";
-                    lobby_ready = false;
-                    team_coins = 0;
-                    is_multiplayer = false;
-                    gameState = GameState::MULTIPLAYER;
-                    NetworkProvider* oldNetwork = g_network;
-                    if (g_network == &LanManager::Get()) {
-                        g_network = &EOSManager::Get();
-                    } else {
-                        g_network = &LanManager::Get();
-                    }
-                    // Bug fix: shut down the old provider first so its
-                    // sockets / notifications / WSA refcount decrement
-                    // before we init the new one (was leaking sockets).
-                    oldNetwork->Shutdown();
-                    g_network->Init();
-                    BindNetworkCallbacks();
-                }
+
 				if (IsKeyPressed(KEY_H)) {
 					g_network->HostGame();
 					// Populate my_lobby_player so the lobby list reflects the

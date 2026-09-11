@@ -26,22 +26,12 @@ if (NOT raylib_FOUND)
 endif()
 
 if (WIN32)
-    add_executable(dodge_magma WIN32 "dodge_the_magma_desktop_cpp.cpp" "EOSManager.cpp" "LanManager.cpp")
+    add_executable(dodge_magma WIN32 "dodge_the_magma_desktop_cpp.cpp" "LanManager.cpp")
 else()
-    add_executable(dodge_magma "dodge_the_magma_desktop_cpp.cpp" "EOSManager.cpp" "LanManager.cpp")
+    add_executable(dodge_magma "dodge_the_magma_desktop_cpp.cpp" "LanManager.cpp")
 endif()
 
-# Setup EOS SDK Paths
-set(EOS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third-party-api/eos-sdk/SDK")
-target_include_directories(dodge_magma PRIVATE "${EOS_SDK_DIR}/Include")
-
-if (WIN32)
-    target_link_libraries(dodge_magma PRIVATE raylib "${EOS_SDK_DIR}/Lib/EOSSDK-Win64-Shipping.lib")
-elseif(APPLE)
-    target_link_libraries(dodge_magma PRIVATE raylib "${EOS_SDK_DIR}/Bin/libEOSSDK-Mac-Shipping.dylib")
-else()
-    target_link_libraries(dodge_magma PRIVATE raylib "${EOS_SDK_DIR}/Bin/libEOSSDK-Linux-Shipping.so")
-endif()
+target_link_libraries(dodge_magma PRIVATE raylib)
 
 # ------------------------------------------------------------
 # Flags/link đặc thù theo hệ điều hành
@@ -62,27 +52,6 @@ endif()
 set_target_properties(dodge_magma PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-
-# Copy EOS SDK binaries to output directory so the executable can find them
-if (WIN32)
-    add_custom_command(TARGET dodge_magma POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${EOS_SDK_DIR}/Bin/EOSSDK-Win64-Shipping.dll"
-        $<TARGET_FILE_DIR:dodge_magma>
-    )
-elseif(APPLE)
-    add_custom_command(TARGET dodge_magma POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${EOS_SDK_DIR}/Bin/libEOSSDK-Mac-Shipping.dylib"
-        $<TARGET_FILE_DIR:dodge_magma>
-    )
-else()
-    add_custom_command(TARGET dodge_magma POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${EOS_SDK_DIR}/Bin/libEOSSDK-Linux-Shipping.so"
-        $<TARGET_FILE_DIR:dodge_magma>
-    )
-endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Multiplayer test suite
@@ -105,7 +74,6 @@ if (BUILD_TESTS)
     target_compile_options(test_multiplayer PRIVATE -O0 -g)
     target_include_directories(test_multiplayer PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../third-party-api/eos-sdk/SDK/Include"
     )
     if (WIN32)
         target_link_libraries(test_multiplayer PRIVATE ws2_32)
