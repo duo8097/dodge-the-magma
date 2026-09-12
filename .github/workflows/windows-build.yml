@@ -23,53 +23,28 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: [ msvc, mingw ]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ---------- MinGW (UCRT64 g++) setup, chỉ chạy ở nhánh mingw ----------
-      - name: Set up MSYS2 (UCRT64 g++)
-        if: matrix.toolchain == 'mingw'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-
       # Cache thư mục build của raylib (FetchContent) để lần build sau nhanh hơn,
-      # khỏi phải git clone + compile lại raylib mỗi lần. Key tách riêng theo toolchain.
+      # khỏi phải git clone + compile lại raylib mỗi lần.
       - name: Cache CMake build dir
         uses: actions/cache@v4
         with:
           path: cpp/build
-          key: ${{ runner.os }}-${{ matrix.toolchain }}-cmake-${{ hashFiles('cpp/CMakeLists.txt') }}
+          key: ${{ runner.os }}-cmake-${{ hashFiles('cpp/CMakeLists.txt') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.toolchain }}-cmake-
+            ${{ runner.os }}-cmake-
 
-      # ---------- Build: MSVC (generator mặc định của cmake trên Windows) ----------
-      - name: Configure & Build (MSVC)
-        if: matrix.toolchain == 'msvc'
-        run: |
-          cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
-          cmake --build cpp/build --config ${{ env.BUILD_TYPE }} --target dodge_magma -j
+      - name: Configure (CMake)
+        run: cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 
-      # ---------- Build: MinGW UCRT64 g++ (chạy trong shell msys2) ----------
-      - name: Configure & Build (g++ / UCRT64)
-        if: matrix.toolchain == 'mingw'
-        shell: msys2 {0}
-        run: |
-          cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
-          cmake --build cpp/build --target dodge_magma -j
+      - name: Build
+        run: cmake --build cpp/build --config ${{ env.BUILD_TYPE }} --target dodge_magma -j
 
-      # MSVC (multi-config generator) bỏ file vào bin/Release, còn Ninja/MinGW bỏ thẳng vào bin/
+      # MSVC (multi-config generator) bỏ file vào bin/Release thay vì bin/
       - name: Locate & stage binary
         shell: pwsh
         run: |
@@ -82,20 +57,20 @@ jobs:
 
       - name: Zip artifact
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath dodge_magma-windows-${{ matrix.toolchain }}.zip
+        run: Compress-Archive -Path dist/* -DestinationPath dodge_magma-windows.zip
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dodge_magma-windows-${{ matrix.toolchain }}
-          path: dodge_magma-windows-${{ matrix.toolchain }}.zip
+          name: dodge_magma-windows
+          path: dodge_magma-windows.zip
           retention-days: 30
 
-      # Chỉ chạy khi push tag dạng v* (vd: v2.1.0) — tự tạo GitHub Release và đính kèm cả 2 bản zip
+      # Chỉ chạy khi push tag dạng v* (vd: v2.1.0) — tự tạo GitHub Release và đính kèm file zip
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dodge_magma-windows-${{ matrix.toolchain }}.zip
+          files: dodge_magma-windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
