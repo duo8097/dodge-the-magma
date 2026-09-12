@@ -7,8 +7,27 @@
 #include <cstdint> // Include for uint64_t etc.
 
 #ifdef _WIN32
+    // WIN32_LEAN_AND_MEAN trims out lesser-used API sets (RPC, Shell, DDE...).
+    // NOGDI/NOUSER are what actually stop windows.h from declaring
+    // Rectangle(), CloseWindow(), ShowCursor(), DrawText()... — names raylib
+    // also uses, which otherwise causes redeclaration errors. NOMINMAX
+    // stops windows.h from defining min/max macros that break std::min/std::max.
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOGDI
+        #define NOGDI
+    #endif
+    #ifndef NOUSER
+        #define NOUSER
+    #endif
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <basetsd.h> // SSIZE_T
+    typedef SSIZE_T ssize_t;
 #else
     #include <sys/socket.h>
     #include <arpa/inet.h>
