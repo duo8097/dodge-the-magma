@@ -25,11 +25,7 @@ if (NOT raylib_FOUND)
     FetchContent_MakeAvailable(raylib)
 endif()
 
-if (WIN32)
-    add_executable(dodge_magma WIN32 "dodge_the_magma_desktop_cpp.cpp" "LanManager.cpp")
-else()
-    add_executable(dodge_magma "dodge_the_magma_desktop_cpp.cpp" "LanManager.cpp")
-endif()
+add_executable(dodge_magma "dodge_the_magma_desktop_cpp.cpp" "LanManager.cpp")
 
 target_link_libraries(dodge_magma PRIVATE raylib)
 
